@@ -1,0 +1,1 @@
+import{a9 as o,ac as r,q as c}from"./index-D4siiPNB.js";function m(i,e){const t=o(),n=r(),a=i({mutation:{onSuccess:()=>{if(t.success(e.successMessage),e.invalidateKeys)for(const s of e.invalidateKeys)n.invalidateQueries({queryKey:s})},onError:s=>{t.error(s)}}}),u=c(()=>a.isPending.value);return{...a,isSubmitting:u}}export{m as u};

@@ -1,0 +1,1 @@
+import{_ as r}from"./_plugin-vue_export-helper-BCo6x5W8.js";import{o,b as e}from"./vendor-vNcy1sFx.js";const n={class:"block border-none h-px bg-white/5"};const s=r({},[["render",function(r,s){return o(),e("hr",n)}]]);export{s as D};

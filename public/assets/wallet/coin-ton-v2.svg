@@ -1,0 +1,32 @@
+<svg width="20" height="20" viewBox="0 0 20 20" fill="none" xmlns="http://www.w3.org/2000/svg">
+<g id="Components (Refactored)">
+<g id="PaymentMethodCard / Crypto">
+<g id="State=Default">
+<g id="Providers / Row">
+<g id="Ton Icon">
+<g clip-path="url(#clip0_421_13914)">
+<g id="Clip path group">
+<mask id="mask0_421_13914" style="mask-type:luminance" maskUnits="userSpaceOnUse" x="0" y="0" width="20" height="20">
+<g id="clip0_3295_49623">
+<path id="Vector" d="M20 0H0V20H20V0Z" fill="white"/>
+</g>
+</mask>
+<g mask="url(#mask0_421_13914)">
+<g id="Group">
+<path id="Vector_2" d="M16 0H4C1.79086 0 0 1.79086 0 4V16C0 18.2091 1.79086 20 4 20H16C18.2091 20 20 18.2091 20 16V4C20 1.79086 18.2091 0 16 0Z" fill="#0098EA"/>
+<path id="Vector_3" d="M13.3764 5H6.62319C5.38151 5 4.59451 6.33943 5.21918 7.42218L9.387 14.6462C9.65902 15.1179 10.3406 15.1179 10.6125 14.6462L14.7812 7.42218C15.4051 6.34112 14.6173 5 13.3764 5ZM9.38362 12.4798L8.47591 10.7231L6.28579 6.80601C6.1413 6.55529 6.31978 6.23404 6.62234 6.23404H9.38279V12.4807L9.38362 12.4798ZM13.7121 6.80516L11.5228 10.724L10.6151 12.4798V6.23319H13.3756C13.6781 6.23319 13.8566 6.55444 13.7121 6.80516Z" fill="white"/>
+</g>
+</g>
+</g>
+</g>
+</g>
+</g>
+</g>
+</g>
+</g>
+<defs>
+<clipPath id="clip0_421_13914">
+<rect width="20" height="20" rx="10" fill="white"/>
+</clipPath>
+</defs>
+</svg>

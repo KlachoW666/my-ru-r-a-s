@@ -1,0 +1,453 @@
+<!doctype html>
+<html lang="ru">
+  <head>
+    <meta charset="UTF-8" />
+    <link rel="icon" type="image/svg+xml" href="/logo-symbol.svg" />
+    <link rel="icon" type="image/png" href="/logo-symbol.png" />
+    <link rel="apple-touch-icon" href="/apple-touch-icon.png" />
+    <meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover" />
+    <meta name="theme-color" content="#181614" />
+
+    <!-- Primary meta -->
+    <meta
+      name="description"
+      content="Открывай кейсы Rust, крути апгрейдер, собирай скины. Кейс-баттлы, дропы и розыгрыши. Кабан раздаёт шансы, а не бонусы."
+    />
+    <meta name="robots" content="index, follow, max-image-preview:large" />
+    <!-- Legacy content-rating signal (age-gate exists at Steam login); Google
+         ignores this, some parental-control filters still read it. -->
+    <meta name="rating" content="adult" />
+    <meta name="author" content="Kaban.gg" />
+    <link rel="canonical" href="https://kaban.gg/" />
+    <meta name="yandex-verification" content="5e390e3b8ce1b223" />
+    <!-- NOTE(seo): no hreflang alternates — ru/en/tr are client-side i18n only
+         (locale picked from localStorage, see src/core/plugins/i18n), every language
+         renders under the same URL. Google requires distinct URLs per language for
+         hreflang to be meaningful, so it doesn't apply here. Revisit if/when the app
+         gets real per-locale routes (e.g. /en/, /tr/). -->
+
+    <!-- Open Graph -->
+    <meta property="og:type" content="website" />
+    <meta property="og:site_name" content="Kaban.gg" />
+    <meta property="og:url" content="https://kaban.gg/" />
+    <meta property="og:locale" content="ru_RU" />
+    <meta property="og:locale:alternate" content="en_US" />
+    <meta property="og:locale:alternate" content="tr_TR" />
+    <meta property="og:title" content="Открытие кейсов Rust и апгрейд скинов | kaban.gg" />
+    <meta
+      property="og:description"
+      content="Открывай кейсы Rust, крути апгрейдер, собирай скины. Кейс-баттлы, дропы и розыгрыши. Кабан раздаёт шансы, а не бонусы."
+    />
+    <meta property="og:image" content="https://kaban.gg/logo-symbol.png" />
+    <meta property="og:image:width" content="256" />
+    <meta property="og:image:height" content="256" />
+    <meta property="og:image:type" content="image/png" />
+    <meta
+      property="og:image:alt"
+      content="Kaban.gg: кабан, маскот платформы открытия кейсов Rust"
+    />
+    <!-- TODO(seo): og:image is currently the 256×256 square logo (public/logo-symbol.png).
+         A real 1200×630 share banner is a design task (brand brief section 6). Once it
+         exists: point og:image/twitter:image/oembed.json at it, update the width/height
+         meta above, and switch twitter:card back to summary_large_image below. -->
+
+    <!-- Twitter / X -->
+    <!-- TODO(seo): switch to "summary_large_image" once a real 1200×630 share banner
+         exists — the current image is a 256×256 square logo, which doesn't fit
+         summary_large_image's ~2:1 aspect ratio and gets cropped/misrendered;
+         "summary" renders a square image correctly. -->
+    <meta name="twitter:card" content="summary" />
+    <!-- NOTE(seo): "twitter:site" omitted — no confirmed live X/Twitter handle yet
+         (brand brief: only Telegram and VK are shown at launch). Add once a real,
+         verified handle exists; a wrong @handle mis-attributes the card. -->
+    <meta name="twitter:title" content="Открытие кейсов Rust и апгрейд скинов | kaban.gg" />
+    <meta
+      name="twitter:description"
+      content="Открывай кейсы Rust, крути апгрейдер, собирай скины. Кейс-баттлы, дропы и розыгрыши."
+    />
+    <meta name="twitter:image" content="https://kaban.gg/logo-symbol.png" />
+
+    <!-- oEmbed -->
+    <link
+      rel="alternate"
+      type="application/json+oembed"
+      href="https://kaban.gg/oembed.json"
+      title="Kaban.gg"
+    />
+
+    <!-- Mobile -->
+    <meta name="mobile-web-app-capable" content="yes" />
+    <meta name="apple-mobile-web-app-capable" content="yes" />
+    <meta name="apple-mobile-web-app-status-bar-style" content="black-translucent" />
+    <meta name="apple-mobile-web-app-title" content="Kaban" />
+
+    <title>Открытие кейсов Rust и апгрейд скинов | kaban.gg</title>
+
+    <!-- Structured data: Organization -->
+    <script type="application/ld+json">
+      {
+        "@context": "https://schema.org",
+        "@type": "Organization",
+        "name": "Kaban.gg",
+        "alternateName": ["Кабан.гг", "Kaban"],
+        "legalName": "I.E. Artem Shits",
+        "taxID": "286.1573426",
+        "url": "https://kaban.gg",
+        "logo": {
+          "@type": "ImageObject",
+          "url": "https://kaban.gg/logo-symbol.png",
+          "width": 256,
+          "height": 256
+        },
+        "description": "Платформа открытия кейсов в стиле Rust: кейсы, кейс-баттлы (замесы), апгрейдер скинов",
+        "areaServed": ["RU", "UA", "KZ", "BY"],
+        "sameAs": ["https://t.me/kabangg", "https://vk.com/kabangg"],
+        "address": {
+          "@type": "PostalAddress",
+          "streetAddress": "N. Zaryan Street, Building 22A",
+          "addressLocality": "Yerevan",
+          "addressRegion": "Arabkir District",
+          "addressCountry": "AM"
+        },
+        "contactPoint": {
+          "@type": "ContactPoint",
+          "email": "support@kaban.gg",
+          "contactType": "customer support",
+          "availableLanguage": ["Russian", "English"]
+        }
+      }
+    </script>
+
+    <!-- Structured data: WebApplication (business-type) -->
+    <script type="application/ld+json">
+      {
+        "@context": "https://schema.org",
+        "@type": "WebApplication",
+        "name": "Kaban.gg",
+        "url": "https://kaban.gg",
+        "applicationCategory": "GameApplication",
+        "operatingSystem": "Web",
+        "browserRequirements": "Requires JavaScript. Modern browser.",
+        "inLanguage": ["ru", "en", "tr"],
+        "description": "Платформа открытия кейсов в стиле Rust: кейсы, кейс-баттлы (замесы), апгрейдер скинов, розыгрыши."
+      }
+    </script>
+    <!-- NOTE(seo): "offers" (price) intentionally omitted — balance is virtual and
+         case prices vary per case, so there's no single accurate fixed-price Offer
+         to publish here. -->
+
+    <!-- Structured data: WebSite -->
+    <script type="application/ld+json">
+      {
+        "@context": "https://schema.org",
+        "@type": "WebSite",
+        "name": "Kaban.gg",
+        "url": "https://kaban.gg",
+        "description": "Открытие кейсов Rust, кейс-баттлы и апгрейдер скинов",
+        "inLanguage": "ru"
+      }
+    </script>
+    <!-- NOTE(seo): no "potentialAction"/SearchAction — the catalog search on "/" is a
+         client-side filter, not a "?search=" query param the page reads on load, so a
+         Sitelinks Searchbox would be non-functional. Re-add only once the home page
+         actually parses a search query param on load. -->
+
+    <!-- Structured data: FAQPage (AI-answerable) -->
+    <script type="application/ld+json">
+      {
+        "@context": "https://schema.org",
+        "@type": "FAQPage",
+        "mainEntity": [
+          {
+            "@type": "Question",
+            "name": "Что такое Kaban.gg?",
+            "acceptedAnswer": {
+              "@type": "Answer",
+              "text": "Kaban.gg: платформа открытия кейсов в стиле Rust. Открывай кейсы, играй в кейс-баттлы (замесы) и апгрейдер, забирай скины. Кабан раздаёт шансы, а не бонусы."
+            }
+          },
+          {
+            "@type": "Question",
+            "name": "Как пополнить баланс и забрать выигрыш на Kaban.gg?",
+            "acceptedAnswer": {
+              "@type": "Answer",
+              "text": "Баланс пополняется картой, криптовалютой или скинами. Выигранные предметы выводятся через Steam trade-link, который указывается в профиле."
+            }
+          },
+          {
+            "@type": "Question",
+            "name": "Что такое кейс-баттлы (замесы) на Kaban.gg?",
+            "acceptedAnswer": {
+              "@type": "Answer",
+              "text": "Кейс-баттл, он же замес: несколько игроков открывают кейсы одновременно, можно создать приватное лобби. Забирает тот, кто открыл дороже."
+            }
+          }
+        ]
+      }
+    </script>
+    <!-- NOTE(seo): no WebPage/Speakable block — the rendered home page has no stable
+         <h1>/summary element for a cssSelector to point at. Add one once the page has
+         a stable heading/summary element; a Speakable pointing at a non-existent
+         selector is invalid and Google ignores it. -->
+
+    <!-- Fonts. The stylesheet is loaded non-render-blocking (media="print" flips
+         to "all" on load) so it never delays first paint; `display=swap` in the
+         URL means text paints immediately in the fallback and swaps to Onest when
+         the webfont arrives. <noscript> keeps it working with JS disabled. -->
+    <link rel="preconnect" href="https://fonts.googleapis.com" />
+    <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin />
+    <link
+      href="https://fonts.googleapis.com/css2?family=Onest:wght@400;500;600;700;900&display=swap"
+      rel="stylesheet"
+      media="print"
+      onload="this.media='all'"
+    />
+    <noscript>
+      <link
+        href="https://fonts.googleapis.com/css2?family=Onest:wght@400;500;600;700;900&display=swap"
+        rel="stylesheet"
+      />
+    </noscript>
+
+    <style>
+      html,
+      body,
+      #app {
+        margin: 0;
+        min-height: 100%;
+      }
+      /* Pre-mount canvas: a dark first paint (matches --bg-canvas, same as the
+         source's `:root`) before tailwind.css loads the body's
+         #100e0d→#070605 gradient. It lives ONLY on <html> on purpose — a solid
+         background on body or #app here sits UNLAYERED and therefore BEATS
+         tailwind's `@layer base body { background: <gradient> }` (unlayered wins
+         over layered in the cascade), which is exactly what washed the whole
+         page to a lighter tone (it was #181614 = --bg-base, lighter than the
+         page background). Keeping #app transparent lets the body gradient show
+         through it, matching the source (`:root` canvas + transparent #app +
+         gradient body). */
+      html {
+        background: #090807;
+      }
+
+      /* Pre-mount boot loader: lives inside #app so it paints on the first HTML
+         byte (zero JS) and is wiped automatically when Vue mounts and replaces
+         #app's children. Anti-flicker: opacity is delayed ~160ms so a fast
+         (cached bundle) load never flashes the spinner. */
+      .app-boot {
+        position: fixed;
+        inset: 0;
+        display: flex;
+        align-items: center;
+        justify-content: center;
+        opacity: 0;
+        animation: app-boot-fade-in 0.2s ease forwards;
+        animation-delay: 0.16s;
+      }
+      .app-boot__spinner {
+        width: 44px;
+        height: 44px;
+        border-radius: 50%;
+        border: 3px solid rgba(255, 255, 255, 0.1);
+        border-top-color: #b2ff00;
+        animation: app-boot-spin 0.8s linear infinite;
+      }
+      @keyframes app-boot-fade-in {
+        to {
+          opacity: 1;
+        }
+      }
+      @keyframes app-boot-spin {
+        to {
+          transform: rotate(360deg);
+        }
+      }
+      @media (prefers-reduced-motion: reduce) {
+        .app-boot__spinner {
+          animation: none;
+        }
+      }
+    </style>
+
+    <!-- Analytics: gated by hostname (skip localhost/dev) and per-tool placeholder check.
+         TODO(stage): once each SDK has a real ID, drop the matching placeholder guard below. -->
+    <script>
+      function shouldLoadAnalytics() {
+        var h = window.location.hostname
+        if (
+          h === 'localhost' ||
+          h === '127.0.0.1' ||
+          h === '0.0.0.0' ||
+          h.endsWith('.local') ||
+          h.startsWith('192.168.') ||
+          h.startsWith('10.')
+        )
+          return false
+        return true
+      }
+      // Helper: returns true if the supplied id is still the .env.example placeholder
+      // (XXXXX..., 0000..., or empty). Each SDK init block calls this to no-op cleanly
+      // until real keys are wired up.
+      function isPlaceholderId(id) {
+        if (!id) return true
+        if (/^X+$/i.test(id)) return true
+        if (/^G-X+$/i.test(id)) return true
+        if (/^0+$/.test(id)) return true
+        // Unsubstituted Vite html token (env var not defined at build time).
+        if (/%VITE_/i.test(id)) return true
+        return false
+      }
+    </script>
+
+    <!-- Google Analytics 4. Measurement id injected via Vite env token () per
+         environment; isPlaceholderId() no-ops when unsubstituted/empty. -->
+    <script>
+      var GA_ID = ''
+      if (shouldLoadAnalytics() && !isPlaceholderId(GA_ID)) {
+        var s = document.createElement('script')
+        s.async = true
+        s.src = 'https://www.googletagmanager.com/gtag/js?id=' + GA_ID
+        document.head.appendChild(s)
+        window.dataLayer = window.dataLayer || []
+        function gtag() {
+          dataLayer.push(arguments)
+        }
+        gtag('js', new Date())
+        gtag('config', GA_ID)
+        window.gtag = gtag
+      }
+    </script>
+
+    <!-- Yandex Metrika. Counter id injected via Vite env token (110085981) per
+         environment; isPlaceholderId() no-ops when unsubstituted/empty. -->
+    <script>
+      var YM_ID = '110085981'
+      if (shouldLoadAnalytics() && !isPlaceholderId(YM_ID)) {
+        ;(function (m, e, t, r, i, k, a) {
+          m[i] =
+            m[i] ||
+            function () {
+              ;(m[i].a = m[i].a || []).push(arguments)
+            }
+          m[i].l = 1 * new Date()
+          for (var j = 0; j < document.scripts.length; j++) {
+            if (document.scripts[j].src === r) return
+          }
+          ;(k = e.createElement(t)),
+            (a = e.getElementsByTagName(t)[0]),
+            (k.async = 1),
+            (k.src = r),
+            a.parentNode.insertBefore(k, a)
+        })(window, document, 'script', 'https://mc.yandex.ru/metrika/tag.js', 'ym')
+        ym(parseInt(YM_ID, 10), 'init', {
+          clickmap: true,
+          webvisor: true,
+          trackLinks: true,
+          accurateTrackBounce: true,
+        })
+      }
+    </script>
+
+    <!-- Chatwoot live chat. Base URL + website token injected via Vite env tokens
+         (https://app.chatwoot.com / x6ZWx5gJhhmSNBmQ4qeKNYD9) per environment;
+         isPlaceholderId() no-ops when either is unsubstituted/empty. The bubble
+         is hidden (hideMessageBubble) — the app opens the messenger from its own
+         support button via window.$chatwoot.toggle('open'). Unlike Intercom the
+         SDK has no command queue: window.$chatwoot only exists after the
+         `chatwoot:ready` event (see src/core/utils/chatwoot.ts). -->
+    <script>
+      var CHATWOOT_BASE_URL = 'https://app.chatwoot.com'.replace(/\/+$/, '')
+      var CHATWOOT_TOKEN = 'x6ZWx5gJhhmSNBmQ4qeKNYD9'
+      if (
+        shouldLoadAnalytics() &&
+        !isPlaceholderId(CHATWOOT_BASE_URL) &&
+        !isPlaceholderId(CHATWOOT_TOKEN)
+      ) {
+        // Signals to whenChatwootReady() that the SDK is loading: the readiness
+        // helper only arms a `chatwoot:ready` listener when this is set, so calls
+        // made while the widget is disabled/never-loads stay a clean no-op
+        // instead of leaking a listener per call.
+        window.__chatwootEnabled = true
+        window.chatwootSettings = { hideMessageBubble: true }
+        ;(function (d, t) {
+          var g = d.createElement(t)
+          var s = d.getElementsByTagName(t)[0]
+          g.src = CHATWOOT_BASE_URL + '/packs/js/sdk.js'
+          g.defer = true
+          g.async = true
+          s.parentNode.insertBefore(g, s)
+          g.onload = function () {
+            window.chatwootSDK.run({ websiteToken: CHATWOOT_TOKEN, baseUrl: CHATWOOT_BASE_URL })
+          }
+        })(document, 'script')
+      }
+    </script>
+    <script type="module" crossorigin src="/assets/js/index-CyyoIbm1.js"></script>
+    <link rel="modulepreload" crossorigin href="/assets/js/vendor-vNcy1sFx.js">
+    <link rel="stylesheet" crossorigin href="/assets/css/vendor-C7FFelxn.css">
+    <link rel="stylesheet" crossorigin href="/assets/css/index-BSsnhUcQ.css">
+    <link rel="modulepreload" href="/assets/js/main-layout-C2wmUZsK.js">
+    <link rel="modulepreload" href="/assets/js/index-DoTdMb5b.js">
+  <link rel="manifest" href="/manifest.webmanifest"></head>
+
+  <body>
+    <!-- Noscript fallbacks. -->
+    <noscript>
+      <div>
+        <img
+          src="https://mc.yandex.ru/watch/110085981"
+          style="position: absolute; left: -9999px"
+          alt=""
+        />
+      </div>
+    </noscript>
+
+    <!-- Crawlable content fallback for JS-less crawlers (GPTBot, ClaudeBot,
+         PerplexityBot, Yandex). The Vue app replaces #app on mount, so this is
+         never shown to users with JS — it gives raw-HTML/AI crawlers answer-first,
+         self-contained, citable text and real internal links until SSR/prerender
+         lands. Keep in sync with on-page copy. -->
+    <noscript>
+      <main>
+        <h1>Kaban.gg: открытие кейсов Rust и апгрейд скинов</h1>
+        <p>
+          Kaban.gg: платформа открытия кейсов в стиле Rust. Открывай кейсы, собирай скины, играй в
+          кейс-баттлы (замесы) и апгрейдер, участвуй в розыгрышах. Пополнение картой, криптовалютой
+          или скинами, вывод выигранных предметов через Steam trade-link. Кабан раздаёт шансы, а не
+          бонусы.
+        </p>
+        <nav aria-label="Разделы Kaban.gg">
+          <ul>
+            <li>
+              <a href="/crate-pvp">Кейс-баттлы Rust (замесы) — играй против других игроков</a>
+            </li>
+            <li><a href="/upgrader">Апгрейдер скинов Rust — поднимай предметы выше</a></li>
+            <li><a href="/giveaway">Розыгрыши скинов Rust для зарегистрированных игроков</a></li>
+          </ul>
+        </nav>
+        <section aria-label="Частые вопросы о Kaban.gg">
+          <h2>Что такое Kaban.gg?</h2>
+          <p>
+            Kaban.gg: платформа открытия кейсов в стиле Rust с кейс-баттлами и апгрейдером. Кабан
+            раздаёт шансы, а не бонусы.
+          </p>
+          <h2>Как забрать выигрыш с Kaban.gg?</h2>
+          <p>Привяжи Steam trade-link в профиле — выигранные предметы выводятся через него.</p>
+        </section>
+        <nav aria-label="Правовая информация">
+          <ul>
+            <li><a href="/terms-and-conditions">Условия использования</a></li>
+            <li><a href="/privacy-policy">Политика конфиденциальности</a></li>
+            <li><a href="/refund-policy">Политика возврата</a></li>
+          </ul>
+        </nav>
+      </main>
+    </noscript>
+
+    <div id="app">
+      <div class="app-boot" aria-hidden="true">
+        <div class="app-boot__spinner"></div>
+      </div>
+    </div>
+  </body>
+</html>

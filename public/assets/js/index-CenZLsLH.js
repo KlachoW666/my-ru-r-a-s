@@ -1,0 +1,1 @@
+import{d as t,r as n}from"./vendor-vNcy1sFx.js";import{g as s}from"./content-CoN_E9fY.js";import"./mutator-DePLmT3f.js";import"./index-CyyoIbm1.js";const a=t("socialLink",()=>{const t=n([]),a=n(!1);return{links:t,isReady:a,fetchLinks:async function(){try{const n=await s();t.value=n.data?.links??[]}catch{}finally{a.value=!0}}}});export{a as useSocialLinkStore};

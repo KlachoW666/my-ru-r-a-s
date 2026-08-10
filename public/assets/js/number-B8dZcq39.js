@@ -1,0 +1,1 @@
+function i(i){const t=Number(i);return Number.isFinite(t)?t:0}function t(i,t=2){const n="number"==typeof i?i:Number(i);return Number.isFinite(n)?n.toLocaleString("ru-RU",{minimumFractionDigits:t,maximumFractionDigits:t}):String(i)}export{t as f,i as t};

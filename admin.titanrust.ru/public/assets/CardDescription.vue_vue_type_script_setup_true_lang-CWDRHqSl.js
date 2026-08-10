@@ -1,0 +1,1 @@
+import{c as t}from"./index-uJp__I_e.js";import{d as a,o as r,c as n,Q as c,f as l,n as p}from"./index-D4siiPNB.js";const f=a({__name:"CardDescription",props:{class:{}},setup(s){const e=s;return(o,d)=>(r(),n("div",{"data-slot":"card-description",class:c(l(t)("text-muted-foreground text-sm",e.class))},[p(o.$slots,"default")],2))}});export{f as _};

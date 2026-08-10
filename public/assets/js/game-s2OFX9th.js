@@ -1,0 +1,1 @@
+import{c as s}from"./mutator-DePLmT3f.js";import{f as a}from"./vendor-vNcy1sFx.js";const o=(a,o)=>s({url:"/config/games",method:"GET",signal:o},a),r=(o,r,t)=>(o=a(o),s({url:"/history",method:"GET",params:a(o),signal:t},r)),t=(a,o)=>s({url:"/stats/global",method:"GET",signal:o},a);export{t as a,o as b,r as g};

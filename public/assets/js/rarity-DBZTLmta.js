@@ -1,0 +1,1 @@
+const n={REGULAR:"756767",UNUSUAL:"4076ff",RARE:"65dc04",VIOLET:"a33ee2",GOLD:"ffc43b"};function t(t){return t in n}function r(r){const o=function(r){const o=r?.trim().toUpperCase();if(o&&t(o))return n[o]}(r);return o?`#${o}`:void 0}export{n as R,t as i,r};

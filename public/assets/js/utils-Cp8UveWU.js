@@ -1,0 +1,1 @@
+const t=new Set;function e(e,s="117, 103, 103"){const n=e?.startsWith("#")?e.slice(1):e;if(!n)return s;if(!/^[0-9a-fA-F]{6}$/.test(n))return t.has(n)||t.add(n),s;return`${parseInt(n.slice(0,2),16)}, ${parseInt(n.slice(2,4),16)}, ${parseInt(n.slice(4,6),16)}`}export{e as h};

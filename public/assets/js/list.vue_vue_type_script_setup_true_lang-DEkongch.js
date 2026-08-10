@@ -1,0 +1,1 @@
+import{a as s,o as a,b as e,n as i,p as o}from"./vendor-vNcy1sFx.js";const r=s({__name:"list",props:{size:{default:"sm"}},setup:s=>(s,r)=>(a(),e("div",{class:i(["grid gap-2 grid-cols-[repeat(auto-fill,minmax(109px,1fr))]",{"md:grid-cols-[repeat(auto-fill,minmax(138px,1fr))]":"md"===s.size}])},[o(s.$slots,"default")],2))});export{r as _};

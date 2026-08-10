@@ -1,0 +1,127 @@
+{
+  "updatedAt": "2026-08-10T18:48:38.413Z",
+  "totalCount": 5411,
+  "count": 10,
+  "skins": [
+    {
+      "id": "steam-2043301313",
+      "name": "High Quality Crate",
+      "marketHashName": "High Quality Crate",
+      "price": 256,
+      "priceText": "256 ₽",
+      "image": "https://community.cloudflare.steamstatic.com/economy/image/6TMcQ7eX6E0EZl2byXi7vaVKyDk_zQLX05x6eLCFM9neAckxGDf7qU2e2gu64OnAeQ7835Ja5WrCfCk4nReh8DEiv5daOaE5qbQ_RPm5kDOs1J0",
+      "rarity": "rare",
+      "colorHex": "#35a3f1",
+      "tradable": true,
+      "listingsCount": 1071
+    },
+    {
+      "id": "steam-1129931352",
+      "name": "Snowcamo Jacket",
+      "marketHashName": "Snowcamo Jacket",
+      "price": 171,
+      "priceText": "171 ₽",
+      "image": "https://community.cloudflare.steamstatic.com/economy/image/6TMcQ7eX6E0EZl2byXi7vaVKyDk_zQLX05x6eLCFM9neAckxGDf7qU2e2gu64OnAeQ7835Je5GLNfCk4nReh8DEiv5dYOas-q7EzQ_u2d97Lo0M",
+      "rarity": "common",
+      "colorHex": "#a7ec2e",
+      "tradable": true,
+      "listingsCount": 1301
+    },
+    {
+      "id": "steam-2039704282",
+      "name": "High Quality Bag",
+      "marketHashName": "High Quality Bag",
+      "price": 1152,
+      "priceText": "1152 ₽",
+      "image": "https://community.cloudflare.steamstatic.com/economy/image/6TMcQ7eX6E0EZl2byXi7vaVKyDk_zQLX05x6eLCFM9neAckxGDf7qU2e2gu64OnAeQ7835Ja5WrAfCk4nReh8DEiv5ddOas5pLYwSPi8vYJTENQ",
+      "rarity": "rare",
+      "colorHex": "#35a3f1",
+      "tradable": true,
+      "listingsCount": 612
+    },
+    {
+      "id": "steam-4356554249",
+      "name": "Whiteout Hoodie",
+      "marketHashName": "Whiteout Hoodie",
+      "price": 2301,
+      "priceText": "2301 ₽",
+      "image": "https://community.cloudflare.steamstatic.com/economy/image/6TMcQ7eX6E0EZl2byXi7vaVKyDk_zQLX05x6eLCFM9neAckxGDf7qU2e2gu64OnAeQ7835dc5GLCfCk4nReh8DEiv5dRP6w3qLw3Sf_Eqvm_tw",
+      "rarity": "common",
+      "colorHex": "#a7ec2e",
+      "tradable": true,
+      "listingsCount": 151
+    },
+    {
+      "id": "steam-4356554248",
+      "name": "Whiteout Pants",
+      "marketHashName": "Whiteout Pants",
+      "price": 1105,
+      "priceText": "1105 ₽",
+      "image": "https://community.cloudflare.steamstatic.com/economy/image/6TMcQ7eX6E0EZl2byXi7vaVKyDk_zQLX05x6eLCFM9neAckxGDf7qU2e2gu64OnAeQ7835dc5GLDfCk4nReh8DEiv5dYPao9rrAxSPi7lED26CA",
+      "rarity": "common",
+      "colorHex": "#a7ec2e",
+      "tradable": true,
+      "listingsCount": 143
+    },
+    {
+      "id": "steam-1368099951",
+      "name": "Two Sided Ornate Hanging Sign",
+      "marketHashName": "Two Sided Ornate Hanging Sign",
+      "price": 23,
+      "priceText": "23 ₽",
+      "image": "https://community.cloudflare.steamstatic.com/economy/image/6TMcQ7eX6E0EZl2byXi7vaVKyDk_zQLX05x6eLCFM9neAckxGDf7qU2e2gu64OnAeQ7835Je5GvMfCk4nReh8DEiv5dYOK09q7w1R_C-SB2rqaQ",
+      "rarity": "rare",
+      "colorHex": "#35a3f1",
+      "tradable": true,
+      "listingsCount": 147
+    },
+    {
+      "id": "steam-2058522159",
+      "name": "Weapon Barrel",
+      "marketHashName": "Weapon Barrel",
+      "price": 811,
+      "priceText": "811 ₽",
+      "image": "https://community.cloudflare.steamstatic.com/economy/image/6TMcQ7eX6E0EZl2byXi7vaVKyDk_zQLX05x6eLCFM9neAckxGDf7qU2e2gu64OnAeQ7835Ja5WrMfCk4nReh8DEiv5daMKk6r70yQhaWnmII",
+      "rarity": "rare",
+      "colorHex": "#35a3f1",
+      "tradable": true,
+      "listingsCount": 611
+    },
+    {
+      "id": "steam-5638210384",
+      "name": "Legacy Bow",
+      "marketHashName": "Legacy Bow",
+      "price": 1225,
+      "priceText": "1225 ₽",
+      "image": "https://community.cloudflare.steamstatic.com/economy/image/6TMcQ7eX6E0EZl2byXi7vaVKyDk_zQLX05x6eLCFM9neAckxGDf7qU2e2gu64OnAeQ7835Je5mHEfCk4nReh8DEiv5dYPaA8q7U_QvBnaMlV6Q",
+      "rarity": "common",
+      "colorHex": "#f15840",
+      "tradable": true,
+      "listingsCount": 54
+    },
+    {
+      "id": "steam-8054335779",
+      "name": "Old Pirate Revolver",
+      "marketHashName": "Old Pirate Revolver",
+      "price": 469,
+      "priceText": "469 ₽",
+      "image": "https://community.cloudflare.steamstatic.com/economy/image/6TMcQ7eX6E0EZl2byXi7vaVKyDk_zQLX05x6eLCFM9neAckxGDf7qU2e2gu64OnAeQ7835VZ4WLAfCk4nReh8DEiv5dbPKo5pbA3Rfy5G6D4QNM",
+      "rarity": "common",
+      "colorHex": "#f15840",
+      "tradable": true,
+      "listingsCount": 251
+    },
+    {
+      "id": "steam-7104051095",
+      "name": "Heat Seeker Mp5",
+      "marketHashName": "Heat Seeker Mp5",
+      "price": 429,
+      "priceText": "429 ₽",
+      "image": "https://community.cloudflare.steamstatic.com/economy/image/6TMcQ7eX6E0EZl2byXi7vaVKyDk_zQLX05x6eLCFM9neAckxGDf7qU2e2gu64OnAeQ7835Vd7GLFfCk4nReh8DEiv5dYOaw7pLU_RPC9nJcdyp4",
+      "rarity": "common",
+      "colorHex": "#f15840",
+      "tradable": true,
+      "listingsCount": 271
+    }
+  ]
+}

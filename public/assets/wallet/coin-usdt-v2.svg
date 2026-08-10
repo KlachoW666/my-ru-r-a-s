@@ -1,0 +1,32 @@
+<svg width="20" height="20" viewBox="0 0 20 20" fill="none" xmlns="http://www.w3.org/2000/svg">
+<g id="Components (Refactored)">
+<g id="PaymentMethodCard / Crypto">
+<g id="State=Default">
+<g id="Providers / Row">
+<g id="Tether Icon">
+<g clip-path="url(#clip0_421_13914)">
+<g id="Clip path group">
+<mask id="mask0_421_13914" style="mask-type:luminance" maskUnits="userSpaceOnUse" x="0" y="0" width="20" height="20">
+<g id="clip0_3295_49678">
+<path id="Vector" d="M20 0H0V20H20V0Z" fill="white"/>
+</g>
+</mask>
+<g mask="url(#mask0_421_13914)">
+<g id="Group">
+<path id="Vector_2" d="M16 0H4C1.79086 0 0 1.79086 0 4V16C0 18.2091 1.79086 20 4 20H16C18.2091 20 20 18.2091 20 16V4C20 1.79086 18.2091 0 16 0Z" fill="#009393"/>
+<path id="Vector_3" fill-rule="evenodd" clip-rule="evenodd" d="M14.8666 6.77256V5H5.10491V6.77256H8.76919V8.00156C6.19566 8.13287 4.26489 8.67231 4.25059 9.31888L4.25049 10.6667C4.26481 11.3133 6.19566 11.8526 8.76919 11.9839V15H11.2023V11.9839C13.7759 11.8526 15.7066 11.3133 15.7209 10.6667L15.7211 9.31888C15.7067 8.67231 13.7759 8.13287 11.2023 8.00156V6.77256H14.8666ZM15.5895 9.99275C15.0278 10.6019 12.7322 11.058 9.98575 11.058C7.23931 11.058 4.94379 10.6019 4.38201 9.99275C4.85839 9.47625 6.58156 9.06975 8.76919 8.95806V10.2448C9.16131 10.2648 9.56831 10.2754 9.98575 10.2754C10.4032 10.2754 10.8103 10.2648 11.2023 10.2448V8.95806C13.3899 9.06975 15.1131 9.47625 15.5895 9.99275Z" fill="white"/>
+</g>
+</g>
+</g>
+</g>
+</g>
+</g>
+</g>
+</g>
+</g>
+<defs>
+<clipPath id="clip0_421_13914">
+<rect width="20" height="20" rx="10" fill="white"/>
+</clipPath>
+</defs>
+</svg>
