@@ -1114,28 +1114,86 @@ app.get(['/api/v1/stats/global', '/api/v1/stats'], (req, res) => {
 // Важно: блок рендерится только когда enabled = isAuthed && isDepositChainEnabled.
 // Гостю он не покажется независимо от ответа сервера — это поведение фронта.
 // Раньше tiers был пустым массивом, поэтому блок не появлялся и у авторизованных.
+// Лестница «Бесплатные кейсы за депозит».
+//
+// Поля тира читаются фронтом как caseName и caseImage (index-DoTdMb5b.js),
+// а не name/image — из-за этого лестница рисовалась, но без картинок и
+// названий кейсов.
+//
+// Статусы, которые понимает вёрстка: opened, ready, collecting, locked.
 const DEPOSIT_TIERS = [
-  { name: 'Камень',  threshold: 0,    image: '/uploads/cases/1786522990114-495918520.webp' },
-  { name: 'Лук',     threshold: 174,  image: '/uploads/cases/1786522990114-495918520.webp' },
-  { name: 'Двушка',  threshold: 384,  image: '/uploads/cases/1786522990114-495918520.webp' },
-  { name: 'Томпсон', threshold: 821,  image: '/uploads/cases/1786522990114-495918520.webp' },
-  { name: 'Калаш',   threshold: 1166, image: '/uploads/cases/1786522990114-495918520.webp' }
+  { name: 'Камень',  threshold: 0 },
+  { name: 'Лук',     threshold: 174 },
+  { name: 'Двушка',  threshold: 384 },
+  { name: 'Томпсон', threshold: 821 },
+  { name: 'Калаш',   threshold: 1166 }
 ];
 
+/** Какие тиры игрок уже забрал. Ключ — id пользователя. */
+const claimedTiers = new Map();
+
+const TIER_FALLBACK_IMAGE = '/uploads/cases/1786522990114-495918520.webp';
+
+function tierImage(idx, cases) {
+  // Берём картинку реального кейса, но только если файл существует на диске:
+  // в базе встречаются ссылки на удалённые загрузки вроде
+  // /assets/uploaded-placeholder.png, и тир оставался бы без картинки.
+  const c = cases[idx % Math.max(cases.length, 1)];
+  const img = c && c.image;
+  if (img && img.startsWith('/') && fs.existsSync(path.join(PUBLIC_DIR, img))) return img;
+  return TIER_FALLBACK_IMAGE;
+}
+
+async function buildDepositTiers(req, mockUser) {
+  const user = (await currentUser(req, mockUser)) || guestUser();
+  const key = String(user.id || 'guest');
+  const claimed = claimedTiers.get(key) || new Set();
+
+  // Сумма депозитов игрока — из истории операций.
+  let collected = 0;
+  if (req.auth && !req.auth.mock) {
+    await ensureTxSchema();
+    const rows = await queryAdminDb(
+      `SELECT COALESCE(SUM(amount), 0) AS s FROM transactions WHERE user_id = ? AND type = 'deposit'`,
+      [req.auth.sub]);
+    collected = rows.length ? Number(rows[0].s) || 0 : 0;
+  }
+
+  const cases = await getLiveCases();
+
+  const tiers = DEPOSIT_TIERS.map((t, idx) => {
+    let status;
+    if (claimed.has(idx)) status = 'opened';
+    else if (collected >= t.threshold) status = 'ready';
+    else status = 'locked';
+    return {
+      tierIndex: idx,
+      caseName: t.name,
+      caseImage: tierImage(idx, cases),
+      // Дубли под другим именем — на случай, если где-то читается name/image.
+      name: t.name,
+      image: tierImage(idx, cases),
+      threshold: t.threshold,
+      collected: Math.min(collected, t.threshold),
+      status
+    };
+  });
+
+  // Первый незабранный тир, который ещё копится, помечаем как collecting —
+  // именно он показывает прогресс «до следующего кейса».
+  const collecting = tiers.find(t => t.status === 'locked');
+  if (collecting) collecting.status = 'collecting';
+
+  const readyIdx = tiers.findIndex(t => t.status === 'ready');
+  const activeTierIndex = readyIdx !== -1
+    ? readyIdx
+    : Math.max(0, tiers.findIndex(t => t.status === 'collecting'));
+
+  return { user, key, claimed, collected, tiers, activeTierIndex };
+}
+
 app.get(['/api/v1/deposit-chain/state', '/api/v1/deposit-chain'], async (req, res) => {
-  const user = await currentUser(req, mockUser);
-  const collected = Number(user && !user.isGuest ? user.depositTotal || 0 : 0);
-
-  const tiers = DEPOSIT_TIERS.map((t, i) => ({
-    tierIndex: i,
-    name: t.name,
-    image: t.image,
-    threshold: t.threshold,
-    collected: Math.min(collected, t.threshold),
-    status: collected >= t.threshold ? 'ready' : 'locked'
-  }));
-  const activeTierIndex = Math.min(tiers.filter(t => t.status === 'ready').length, tiers.length - 1);
-
+  const { tiers, activeTierIndex, collected } = await buildDepositTiers(req, mockUser);
   res.json({
     status: "success",
     data: {
@@ -1143,14 +1201,77 @@ app.get(['/api/v1/deposit-chain/state', '/api/v1/deposit-chain'], async (req, re
       step: activeTierIndex + 1,
       showLadder: true,
       variant: "A",
-      completed: activeTierIndex >= tiers.length - 1 && collected >= DEPOSIT_TIERS[DEPOSIT_TIERS.length - 1].threshold,
+      completed: tiers.every(t => t.status === 'opened'),
       currency: "RUB",
+      totalCollected: collected,
       activeTierIndex,
       tiers
     }
   });
 });
 
+// Забрать бесплатный кейс тира. Фронт зовёт это из openTier().
+app.post('/api/v1/deposit-chain/open', async (req, res) => {
+  const tierIndex = Number(req.body?.tierIndex);
+  const { key, claimed, tiers } = await buildDepositTiers(req, mockUser);
+  const tier = tiers[tierIndex];
+
+  if (!tier) {
+    return res.status(400).json({ status: "error", code: "NO_TIER", message: "Такого тира нет" });
+  }
+  if (tier.status === 'opened') {
+    return res.status(409).json({ status: "error", code: "ALREADY_OPENED", message: "Этот кейс уже забран" });
+  }
+  if (tier.status !== 'ready') {
+    return res.status(403).json({
+      status: "error", code: "NOT_READY",
+      message: `Нужно пополнить ещё ${tier.threshold - tier.collected} ₽`
+    });
+  }
+
+  // Разыгрываем содержимое по тем же правилам, что и обычный кейс.
+  const cases = await getLiveCases();
+  const src = cases[tierIndex % Math.max(cases.length, 1)];
+  // Пул берём из каталога по цене тира, а не из состава кейса: составы бывают
+  // битыми, и бесплатный кейс за 0 руб выдавал предмет за 15 400 руб.
+  const nominal = Math.max(tier.threshold, 50);
+  const picked = await queryItems({ minPrice: 10, maxPrice: nominal * 3, limit: 40, sort: 'asc' });
+  const pool = picked.items.length ? picked.items : await getFallbackItems();
+  const dist = buildDistribution(pool, { casePrice: nominal, rtp: DEFAULT_RTP });
+
+  const { serverSeed, serverHash } = newServerSeed();
+  const clientSeed = String(req.body?.clientSeed || crypto.randomBytes(8).toString('hex'));
+  const rolled = rollOne(dist, { serverSeed, clientSeed, nonce: tierIndex });
+  const item = rolled.item || pool[0];
+
+  claimed.add(tierIndex);
+  claimedTiers.set(key, claimed);
+
+  const value = Number(item?.price) || 0;
+  const balance = await adjustBalance(req, mockUser, value);
+  await recordTransaction(req, 'deposit_chain', value, `Бесплатный кейс: ${tier.caseName}`);
+
+  const user = (await currentUser(req, mockUser)) || guestUser();
+  if (item) {
+    pushLiveDrop(makeWin({
+      item: { name: item.name, price: value, image: item.image, rarity: item.rarity, colorHex: item.color },
+      user: { id: user.id, name: user.username, avatar: user.avatar },
+      eventType: 'CASE', caseSlug: src ? src.slug : '', caseImage: tier.caseImage,
+      betAmount: 0, wonAt: Math.floor(Date.now() / 1000)
+    }));
+  }
+
+  res.json({
+    status: "success",
+    data: {
+      tierIndex,
+      items: item ? [{ id: item.id, name: item.name, image: fixImageUrl(item.image), price: value, rarity: item.rarity, color: item.color }] : [],
+      winnings: value,
+      newBalance: balance,
+      serverHash, serverSeed, clientSeed, nonce: tierIndex
+    }
+  });
+});
 // Upgrader endpoints
 // Каталог апгрейдера.
 //
