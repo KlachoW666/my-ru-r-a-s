@@ -40,6 +40,9 @@ const {
   buildDistribution, rollOne, newServerSeed, chancesForDisplay, fairFloat, DEFAULT_RTP
 } = require('./services/drops');
 const { cleanDanglingCaseItems, getCaseHealth, getBrokenCases, MAX_RTP } = require('./services/caseHealth');
+const { verifyMailer } = require('./services/mailer');
+const { makeBattlesService } = require('./services/battles');
+const { makeGiveawaysService } = require('./services/giveaways');
 
 // --- Баланс ------------------------------------------------------------------
 // Авторизованному пишем в users.balance, гостю — в mockUser (в памяти).
@@ -430,6 +433,39 @@ const mockStats = {
   upgradesCount: 45120,
   battlesCount: 18920
 };
+
+// --- Баттлы и розыгрыши -----------------------------------------------------
+// Оба сервиса держат состояние в SQLite: до этого списки были статичными
+// моками в памяти, а create/join ничего не сохраняли.
+
+/** Начисление по id пользователя — нужно розыгрышам, где нет объекта req. */
+async function adjustBalanceById(userId, delta, txType, comment) {
+  const rows = await queryAdminDb(`SELECT balance FROM users WHERE id = ?`, [userId]);
+  if (!rows.length) return null;
+  const next = Math.max(0, +((Number(rows[0].balance) || 0) + delta).toFixed(2));
+  await new Promise((resolve) => {
+    const db = getAdminDb();
+    if (!db) return resolve();
+    db.run(`UPDATE users SET balance = ? WHERE id = ?`, [next, userId], () => { db.close(); resolve(); });
+  });
+  if (txType) {
+    await ensureTxSchema();
+    await new Promise((resolve) => {
+      const db = getAdminDb();
+      if (!db) return resolve();
+      db.run(`INSERT INTO transactions (user_id, type, amount, comment) VALUES (?, ?, ?, ?)`,
+        [userId, txType, delta, comment || ''], () => { db.close(); resolve(); });
+    });
+  }
+  return next;
+}
+
+const battles = makeBattlesService({
+  queryAdminDb, getAdminDb, getCaseItemsFromDb, getFallbackItems, fixImageUrl
+});
+const giveaways = makeGiveawaysService({
+  queryAdminDb, getAdminDb, queryItems, adjustBalanceById, fixImageUrl
+});
 
 // --- ЛЕНТА ДРОПОВ -----------------------------------------------------------
 // Кольцевой буфер реальных выигрышей + синтетический наполнитель, чтобы лента
@@ -1461,83 +1497,174 @@ app.post('/api/v1/upgrader/offer/accept', (req, res) => {
 });
 
 // Giveaways endpoints
-app.get('/api/v1/giveaways/active-mega', async (req, res) => {
-  const skins = await getLiveItems();
-  res.json({
-    status: "success",
-    data: {
-      id: "mega-1",
-      title: "Мега Розыгрыш Месяца",
-      prize: skins[0]?.name || "High Quality Crate",
-      price: skins[0]?.price || 2500,
-      participantsCount: 892,
-      endsAt: new Date(Date.now() + 604800000).toISOString(),
-      image: skins[0]?.image || "/assets/raffle/mega-poster.webp"
-    }
-  });
-});
+// Моки розыгрышей удалены: реальные роуты объявлены ниже, в блоке РОЗЫГРЫШИ.
+// Express берёт первый совпавший обработчик, поэтому дубли выше перекрывали их.
 
-app.get(['/api/v1/giveaway', '/api/v1/giveaways'], (req, res) => {
-  res.json({
-    status: "success",
-    data: [
-      {
-        id: "g-1",
-        title: "Ежедневный Розыгрыш AK-47",
-        prize: "AK-47 | Tempered",
-        price: 4500,
-        participantsCount: 142,
-        endsAt: new Date(Date.now() + 86400000).toISOString(),
-        image: "/assets/battles/winner-boar.png"
-      }
-    ]
-  });
-});
-
-app.post('/api/v1/giveaways/:id/join', (req, res) => {
-  res.json({ status: "success", message: "Вы успешно вступили в розыгрыш!" });
-});
 
 // Crate PVP / Battles endpoints
+// --- БАТТЛЫ -----------------------------------------------------------------
+
 app.get(['/api/v1/crate-pvp', '/api/v1/battles'], async (req, res) => {
-  const cases = await getLiveCases();
-  res.json({
-    status: "success",
-    data: [
-      {
-        id: "b-1",
-        name: "Замес #1",
-        cases: [cases[0]],
-        totalPrice: 98,
-        playersCount: 2,
-        maxPlayers: 2,
-        status: "waiting",
-        creator: mockUser
-      }
-    ]
-  });
+  res.json({ status: "success", data: await battles.list({ status: req.query.status }) });
+});
+
+app.get('/api/v1/battles/:uid', async (req, res) => {
+  const battle = await battles.getByUid(req.params.uid, { withDrops: true });
+  if (!battle) return res.status(404).json({ status: "error", code: "NOT_FOUND", message: "Замес не найден" });
+  res.json({ status: "success", data: { battle } });
 });
 
 app.post('/api/v1/battles/create', async (req, res) => {
-  const cases = await getLiveCases();
-  const newBattle = {
-    id: "b-" + Date.now(),
-    name: "Замес #2",
-    cases: [cases[0]],
-    totalPrice: 98,
-    playersCount: 1,
-    maxPlayers: 2,
-    status: "waiting",
-    creator: mockUser
+  try {
+    const user = (await currentUser(req, mockUser)) || guestUser();
+    if (user.isGuest) {
+      return res.status(401).json({ status: "error", code: "UNAUTHORIZED", message: "Нужна авторизация" });
+    }
+
+    const body = req.body || {};
+    const rawCases = body.caseIds || body.cases || body.caseSlugs || [];
+    const caseSlugs = (Array.isArray(rawCases) ? rawCases : [rawCases])
+      .map(c => String(typeof c === 'object' ? (c.slug || c.id) : c)).filter(Boolean);
+    if (!caseSlugs.length) {
+      return res.status(400).json({ status: "error", code: "NO_CASES", message: "Не выбран ни один кейс" });
+    }
+
+    const rounds = Math.min(Math.max(parseInt(body.rounds) || 1, 1), 10);
+    const maxPlayers = [2, 3, 4].includes(Number(body.maxPlayers || body.players))
+      ? Number(body.maxPlayers || body.players) : 2;
+
+    // Цена входа — сумма выбранных кейсов, умноженная на число раундов.
+    const loaded = await battles.loadCases(caseSlugs);
+    if (!loaded.length) {
+      return res.status(400).json({ status: "error", code: "NO_CASES", message: "Кейсы не найдены" });
+    }
+    const price = loaded.reduce((a, c) => a + (Number(c.row.price) || 0), 0) * rounds;
+
+    const balance = await getBalance(req, mockUser);
+    if (balance < price) {
+      return res.status(400).json({
+        status: "error", code: "INSUFFICIENT_BALANCE",
+        message: `Недостаточно средств: нужно ${price} ₽, на балансе ${balance} ₽`
+      });
+    }
+    await adjustBalance(req, mockUser, -price);
+    await recordTransaction(req, 'battle_entry', -price, `Создание замеса на ${caseSlugs.length} кейс(ов)`);
+
+    const created = await battles.create({
+      user, caseSlugs, rounds, maxPlayers, isPrivate: !!body.isPrivate, price
+    });
+    if (!created) {
+      await adjustBalance(req, mockUser, price);   // не смогли создать — вернули деньги
+      return res.status(500).json({ status: "error", message: "Не удалось создать замес" });
+    }
+    res.json({ status: "success", data: { battleId: created.uid, uid: created.uid, price } });
+  } catch (e) {
+    console.error('POST /battles/create:', e);
+    res.status(500).json({ status: "error", message: e.message });
+  }
+});
+
+/** Общий вход: живой игрок или бот. */
+async function joinBattle(req, res, asBot) {
+  try {
+    const uid = req.params.uid || req.params.id;
+    const user = (await currentUser(req, mockUser)) || guestUser();
+    if (!asBot && user.isGuest) {
+      return res.status(401).json({ status: "error", code: "UNAUTHORIZED", message: "Нужна авторизация" });
+    }
+
+    const info = await battles.getByUid(uid);
+    if (!info) return res.status(404).json({ status: "error", code: "NOT_FOUND", message: "Замес не найден" });
+
+    if (!asBot) {
+      const balance = await getBalance(req, mockUser);
+      if (balance < info.totalPrice) {
+        return res.status(400).json({
+          status: "error", code: "INSUFFICIENT_BALANCE",
+          message: `Недостаточно средств: нужно ${info.totalPrice} ₽`
+        });
+      }
+    }
+
+    const joined = await battles.join({ uid, user, asBot });
+    if (joined.error) {
+      return res.status(joined.error === 'NOT_FOUND' ? 404 : 409)
+        .json({ status: "error", code: joined.error, message: joined.message });
+    }
+
+    if (!asBot) {
+      await adjustBalance(req, mockUser, -info.totalPrice);
+      await recordTransaction(req, 'battle_entry', -info.totalPrice, `Вход в замес ${uid}`);
+    }
+
+    let result = null;
+    if (joined.full) {
+      result = await battles.play(joined.battleDbId);
+      // Банк победителям. Боты ничего не получают — их доля остаётся у площадки.
+      for (const w of (result?.winners || [])) {
+        if (!w.isBot) await adjustBalanceById(w.userId, w.share, 'battle_win', `Победа в замесе ${uid}`);
+      }
+    }
+
+    const battle = await battles.getByUid(uid, { withDrops: true });
+    res.json({ status: "success", data: { success: true, battle, result } });
+  } catch (e) {
+    console.error('POST /battles/join:', e);
+    res.status(500).json({ status: "error", message: e.message });
+  }
+}
+
+app.post(['/api/v1/battles/:uid/join'], (req, res) => joinBattle(req, res, false));
+app.post(['/api/v1/battles/:uid/add-bot'], (req, res) => joinBattle(req, res, true));
+
+app.post('/api/v1/battles/:uid/recreate', async (req, res) => {
+  const src = await battles.getByUid(req.params.uid);
+  if (!src) return res.status(404).json({ status: "error", code: "NOT_FOUND", message: "Замес не найден" });
+  req.body = {
+    caseIds: src.cases.map(c => c.slug),
+    rounds: src.rounds,
+    maxPlayers: src.maxPlayers,
+    isPrivate: src.isPrivate
   };
-  res.json({ status: "success", data: newBattle });
+  app._router.handle(Object.assign(req, { url: '/api/v1/battles/create', method: 'POST' }), res, () => {});
 });
 
-app.post(['/api/v1/battles/:id/join', '/api/v1/battles/:id/add-bot'], (req, res) => {
-  res.json({ status: "success", message: "Игрок подключён к баттлу" });
+// --- РОЗЫГРЫШИ ---------------------------------------------------------------
+
+app.get('/api/v1/giveaways/active-mega', async (req, res) => {
+  res.json({ status: "success", data: await giveaways.activeMega() });
 });
 
-// Wallet & Deposit endpoints
+app.get('/api/v1/giveaways/history', async (req, res) => {
+  res.json({ status: "success", data: await giveaways.history() });
+});
+
+app.get(['/api/v1/giveaway', '/api/v1/giveaways'], async (req, res) => {
+  res.json({ status: "success", data: await giveaways.list({ status: req.query.status || 'active' }) });
+});
+
+app.get('/api/v1/giveaways/:uid/participants', async (req, res) => {
+  res.json({ status: "success", data: await giveaways.participants(req.params.uid) });
+});
+
+app.post(['/api/v1/giveaways/:uid/join', '/api/v1/giveaway/:uid/join'], async (req, res) => {
+  const user = (await currentUser(req, mockUser)) || guestUser();
+  let depositTotal = 0;
+  if (req.auth && !req.auth.mock) {
+    await ensureTxSchema();
+    const rows = await queryAdminDb(
+      `SELECT COALESCE(SUM(amount), 0) AS s FROM transactions WHERE user_id = ? AND type = 'deposit'`,
+      [req.auth.sub]);
+    depositTotal = rows.length ? Number(rows[0].s) || 0 : 0;
+  }
+  const r = await giveaways.join({ uid: req.params.uid, user, depositTotal });
+  if (r.error) {
+    const code = r.error === 'UNAUTHORIZED' ? 401 : r.error === 'NOT_FOUND' ? 404 : 409;
+    return res.status(code).json({ status: "error", code: r.error, message: r.message });
+  }
+  res.json({ status: "success", data: r, message: "Вы участвуете в розыгрыше" });
+});
+
 app.get(['/api/v1/wallet', '/api/v1/wallet/config'], async (req, res) => {
   const balance = await getBalance(req, mockUser);
   res.json({
@@ -1704,6 +1831,10 @@ wss.on('connection', (ws) => {
 
 server.listen(PORT, async () => {
   await ensureAuthSchema();
+  await verifyMailer();
+  await battles.ensureSchema();
+  await giveaways.seedIfEmpty();
+  giveaways.startTimer();
 
   // Чистим связи кейсов, ведущие на удалённые предметы, и предупреждаем о
   // кейсах, которые в текущем виде открывать нельзя.

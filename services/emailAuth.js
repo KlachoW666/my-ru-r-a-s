@@ -16,6 +16,7 @@
  */
 
 const crypto = require('crypto');
+const { sendVerificationCode, sendPasswordResetCode } = require('./mailer');
 
 const AUTO_VERIFY = process.env.MAIL_AUTO_VERIFY === '1';
 const CODE_TTL_MS = 15 * 60 * 1000;
@@ -142,8 +143,8 @@ function registerEmailRoutes(app, deps) {
         return res.json({ status: 'success', data: { accessToken, user: toPublicUser(user) } });
       }
 
-      // SMTP нет — код виден в логе сервера.
-      console.log(`[EmailAuth] Код подтверждения для ${email}: ${code}`);
+      // Уходит письмом, если настроен SMTP; иначе печатается в лог (services/mailer.js).
+      await sendVerificationCode(email, code);
       res.json({
         status: 'success',
         data: { email, verificationRequired: true },
@@ -193,7 +194,7 @@ function registerEmailRoutes(app, deps) {
     await run(db, `UPDATE users SET verify_code = ?, verify_expires = ? WHERE id = ?`,
       [code, Date.now() + CODE_TTL_MS, row.id]);
     db.close();
-    console.log(`[EmailAuth] Повторный код для ${email}: ${code}`);
+    await sendVerificationCode(email, code);
     res.json({ status: 'success', message: 'Если адрес зарегистрирован, код отправлен' });
   });
 
@@ -228,7 +229,7 @@ function registerEmailRoutes(app, deps) {
       await run(db, `UPDATE users SET reset_code = ?, reset_expires = ? WHERE id = ?`,
         [code, Date.now() + CODE_TTL_MS, row.id]);
       db.close();
-      console.log(`[EmailAuth] Код сброса пароля для ${email}: ${code}`);
+      await sendPasswordResetCode(email, code);
     }
     res.json({ status: 'success', message: 'Если адрес зарегистрирован, код отправлен' });
   });
