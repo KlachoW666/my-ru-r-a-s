@@ -503,19 +503,19 @@ function makeAdminRoutes({ app, dbAll, dbGet, dbRun, requireAdminJWT }) {
   // ТОП ДРОПОВ
   // ===========================================================================
 
+    // Топ дропов по ВСЕМ источникам: инвентарь пополняется из кейсов, апгрейдера,
+  // баттлов, розыгрышей и депозитной лестницы. Раньше считалось только по
+  // battle_drops, поэтому одиночные открытия кейсов в топ не попадали.
   app.get('/api/v1/admin/topdrops', requireAdminJWT, async (req, res) => {
     const cfg = await readSetting('topdrops', { minPrice: 5000, limit: 20 });
     const rows = await dbAll(
-      `SELECT d.item_name, d.item_image, d.item_price, d.item_rarity, b.uid AS battle_uid, p.username
-       FROM battle_drops d
-       LEFT JOIN battles b ON b.id = d.battle_id
-       LEFT JOIN battle_players p ON p.battle_id = d.battle_id AND p.slot = d.slot
-       WHERE d.item_price >= ?
-       ORDER BY d.item_price DESC LIMIT ?`,
+      `SELECT inv.id, inv.name AS item_name, inv.image AS item_image, inv.price AS item_price,
+              inv.rarity AS item_rarity, inv.source, inv.created_at, u.username
+       FROM inventory inv LEFT JOIN users u ON u.id = inv.user_id
+       WHERE inv.price >= ? ORDER BY inv.price DESC LIMIT ?`,
       [cfg.minPrice || 0, cfg.limit || 20]).catch(() => []);
     res.json({ success: true, data: rows, items: rows, total: rows.length, config: cfg });
   });
-
   app.post(['/api/v1/admin/topdrops/recalculate', '/api/v1/admin/topdrops/board/clear'], requireAdminJWT, async (req, res) => {
     ok(res, { status: 'done', recalculatedAt: new Date().toISOString() });
   });

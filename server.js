@@ -113,6 +113,17 @@ async function adjustBalance(req, mockUser, delta) {
   return next;
 }
 
+// --- Настройки из админки ---------------------------------------------------
+// Игровой сервер читает те же таблицы, что правит админка. До этого режимы
+// игр, соцсети и методы оплаты были захардкожены в этом файле: правки в
+// админке на сайт не попадали вообще.
+
+async function adminSetting(key, fallback = {}) {
+  const rows = await queryAdminDb(`SELECT value FROM app_settings WHERE key = ?`, [key]);
+  if (!rows.length) return fallback;
+  try { return JSON.parse(rows[0].value); } catch { return fallback; }
+}
+
 // --- Кэш ответов в памяти -------------------------------------------------
 // Сайт читает каталог из SQLite, а не из Steam, поэтому единственное, что тут
 // нужно, — не дёргать базу на каждый запрос. TTL 30 с: именно с такой частотой
@@ -1136,11 +1147,32 @@ app.put(['/api/v1/user/tradeurl', '/api/v1/user/display-name', '/api/v1/user/ava
 });
 
 // Config endpoints
-app.get(['/api/v1/config', '/api/v1/config/games', '/api/v1/game/config'], (req, res) => {
-  res.json({ status: "success", data: { config: mockConfig, modes: mockConfig.modes } });
+app.get(['/api/v1/config', '/api/v1/config/games', '/api/v1/game/config'], async (req, res) => {
+  // Режимы берутся из game_configs, которую правит админка. Имена там свои
+  // ('cases', 'battles', 'upgrader'), а фронт знает 'case_opening', 'battle',
+  // 'upgrade' — поэтому сопоставляем явно.
+  const MAP = { cases: 'case_opening', battles: 'battle', upgrader: 'upgrade', deposit_chain: 'deposit_chain' };
+  const data = await cached('siteConfig', 30000, async () => {
+    const rows = await queryAdminDb(`SELECT id, enabled FROM game_configs`);
+    const modes = mockConfig.modes.map(m => ({ ...m }));
+    for (const r of rows) {
+      const frontName = MAP[r.id];
+      const mode = modes.find(m => m.name === frontName);
+      if (mode) mode.enabled = r.enabled === 1;
+    }
+    const td = await adminSetting('topdrops', { visible: true });
+    return { ...mockConfig, modes, topDropsVisible: td.visible !== false };
+  });
+  res.json({ status: "success", data: { config: data, modes: data.modes } });
 });
 
-app.get(['/api/v1/config/socials', '/config/socials'], (req, res) => {
+app.get(['/api/v1/config/socials', '/config/socials'], async (req, res) => {
+  const links = await cached('siteSocials', 30000, async () => {
+    const rows = await queryAdminDb(`SELECT name, url FROM social_links WHERE enabled = 1 ORDER BY position ASC`);
+    return rows.filter(r => r.url).map(r => ({ name: r.name, url: r.url }));
+  });
+  if (links.length) return res.json({ status: "success", data: { links } });
+  // Таблицы ещё нет — отдаём прежний список, чтобы блок не опустел.
   res.json({
     status: "success",
     data: {
@@ -1153,25 +1185,115 @@ app.get(['/api/v1/config/socials', '/config/socials'], (req, res) => {
 });
 
 // Promo code endpoints
-app.post('/api/v1/promo/redeem', (req, res) => {
-  const { code } = req.body || {};
-  mockUser.balance += 250;
-  res.json({
-    status: "success",
-    data: {
-      success: true,
-      message: `Промокод "${code || 'KABAN'}" успешно применён! +250 ₽ на баланс.`,
-      newBalance: mockUser.balance
+// Промокоды.
+//
+// Было: принимался ЛЮБОЙ код и начислял фиксированную сумму — способ
+// бесконечно пополнять баланс. Таблица promo_codes в админке существовала,
+// но сервер в неё не смотрел.
+//
+// Стало: код ищется в базе, проверяются активность, срок, лимит использований,
+// минимальный депозит и повторное применение одним игроком.
+
+let promoSchemaReady = false;
+async function ensurePromoSchema() {
+  if (promoSchemaReady) return;
+  await new Promise((resolve) => {
+    const db = getAdminDb();
+    if (!db) return resolve();
+    db.run(`CREATE TABLE IF NOT EXISTS promo_uses (
+      id INTEGER PRIMARY KEY AUTOINCREMENT,
+      promo_id INTEGER, user_id TEXT, amount REAL,
+      created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+      UNIQUE(promo_id, user_id))`, () => { db.close(); resolve(); });
+  });
+  promoSchemaReady = true;
+}
+
+/** Общая проверка для validate и redeem. */
+async function checkPromo(code, user, req) {
+  await ensurePromoSchema();
+  const norm = String(code || '').trim().toUpperCase();
+  if (!norm) return { error: 'EMPTY', message: 'Введите промокод' };
+
+  const rows = await queryAdminDb(
+    `SELECT * FROM promo_codes WHERE UPPER(code) = ?`, [norm]);
+  const p = rows[0];
+  if (!p) return { error: 'NOT_FOUND', message: 'Промокод не найден' };
+  if (p.active === 0) return { error: 'INACTIVE', message: 'Промокод отключён' };
+  if (p.expires_at && new Date(p.expires_at).getTime() < Date.now()) {
+    return { error: 'EXPIRED', message: 'Срок действия промокода истёк' };
+  }
+  if (p.uses_limit > 0 && p.uses_count >= p.uses_limit) {
+    return { error: 'LIMIT_REACHED', message: 'Лимит использований исчерпан' };
+  }
+  if (!user || user.isGuest) return { error: 'UNAUTHORIZED', message: 'Войдите, чтобы применить промокод' };
+
+  const used = await queryAdminDb(
+    `SELECT id FROM promo_uses WHERE promo_id = ? AND user_id = ?`, [p.id, String(user.id)]);
+  if (used.length) return { error: 'ALREADY_USED', message: 'Вы уже применяли этот промокод' };
+
+  if (p.min_deposit > 0) {
+    const dep = await queryAdminDb(
+      `SELECT COALESCE(SUM(amount),0) AS s FROM transactions WHERE user_id = ? AND type = 'deposit'`,
+      [String(user.id)]);
+    const total = Number(dep[0]?.s || 0);
+    if (total < p.min_deposit) {
+      return { error: 'MIN_DEPOSIT', message: `Нужен депозит от ${p.min_deposit} ₽ (у вас ${Math.round(total)} ₽)` };
     }
+  }
+  return { ok: true, promo: p };
+}
+
+app.post('/api/v1/promo/redeem', async (req, res) => {
+  const user = (await currentUser(req, mockUser)) || guestUser();
+  const r = await checkPromo(req.body?.code, user, req);
+  if (r.error) {
+    return res.status(r.error === 'UNAUTHORIZED' ? 401 : 400)
+      .json({ status: 'error', code: r.error, message: r.message });
+  }
+
+  const p = r.promo;
+  const amount = Number(p.value) || 0;
+  const balance = await adjustBalance(req, mockUser, amount);
+
+  await new Promise((resolve) => {
+    const db = getAdminDb(); if (!db) return resolve();
+    db.run(`INSERT OR IGNORE INTO promo_uses (promo_id, user_id, amount) VALUES (?, ?, ?)`,
+      [p.id, String(user.id), amount], () => { db.close(); resolve(); });
+  });
+  await new Promise((resolve) => {
+    const db = getAdminDb(); if (!db) return resolve();
+    db.run(`UPDATE promo_codes SET uses_count = uses_count + 1 WHERE id = ?`, [p.id],
+      () => { db.close(); resolve(); });
+  });
+  await recordTransaction(req, 'promo', amount, `Промокод ${p.code}`);
+
+  res.json({
+    status: 'success',
+    data: { success: true, code: p.code, amount, newBalance: balance, balance },
+    message: `Промокод «${p.code}» применён: +${amount} ₽ на баланс`
   });
 });
 
-app.post('/api/v1/promo/validate', (req, res) => {
-  res.json({ status: "success", data: { valid: true, bonusPercent: 15 } });
+app.post('/api/v1/promo/validate', async (req, res) => {
+  const user = (await currentUser(req, mockUser)) || guestUser();
+  const r = await checkPromo(req.body?.code || req.query?.code, user, req);
+  if (r.error) {
+    return res.status(400).json({ status: 'error', code: r.error, message: r.message, data: { valid: false } });
+  }
+  res.json({
+    status: 'success',
+    data: { valid: true, code: r.promo.code, kind: r.promo.kind, value: r.promo.value }
+  });
 });
 
-app.get('/api/v1/promo/active', (req, res) => {
-  res.json({ status: "success", data: null });
+app.get('/api/v1/promo/active', async (req, res) => {
+  const rows = await queryAdminDb(
+    `SELECT code, kind, value, min_deposit, expires_at FROM promo_codes
+     WHERE active = 1 AND (expires_at IS NULL OR expires_at > datetime('now'))
+       AND (uses_limit = 0 OR uses_count < uses_limit)
+     ORDER BY value DESC LIMIT 1`);
+  res.json({ status: 'success', data: rows[0] || null });
 });
 
 // Banners (Synchronized with admin.titanrust.ru)
@@ -1240,13 +1362,19 @@ app.get(['/api/v1/stats/global', '/api/v1/stats'], async (req, res) => {
 // названий кейсов.
 //
 // Статусы, которые понимает вёрстка: opened, ready, collecting, locked.
-const DEPOSIT_TIERS = [
+// Значения по умолчанию; реальные тиры берутся из настроек админки.
+const DEPOSIT_TIERS_FALLBACK = [
   { name: 'Камень',  threshold: 0 },
   { name: 'Лук',     threshold: 174 },
   { name: 'Двушка',  threshold: 384 },
   { name: 'Томпсон', threshold: 821 },
   { name: 'Калаш',   threshold: 1166 }
 ];
+
+async function depositTiersConfig() {
+  const cfg = await adminSetting('deposit_chain', {});
+  return Array.isArray(cfg.tiers) && cfg.tiers.length ? cfg.tiers : DEPOSIT_TIERS_FALLBACK;
+}
 
 /** Какие тиры игрок уже забрал. Ключ — id пользователя. */
 const claimedTiers = new Map();
@@ -1280,7 +1408,8 @@ async function buildDepositTiers(req, mockUser) {
 
   const cases = await getLiveCases();
 
-  const tiers = DEPOSIT_TIERS.map((t, idx) => {
+  const TIERS = await depositTiersConfig();
+  const tiers = TIERS.map((t, idx) => {
     let status;
     if (claimed.has(idx)) status = 'opened';
     else if (collected >= t.threshold) status = 'ready';
@@ -1851,6 +1980,34 @@ app.post(['/api/v1/giveaways/:uid/join', '/api/v1/giveaway/:uid/join'], async (r
 
 app.get(['/api/v1/wallet', '/api/v1/wallet/config'], async (req, res) => {
   const balance = await getBalance(req, mockUser);
+  // Методы оплаты и лимиты — из таблиц админки, а не из констант.
+  const wallet = await cached('siteWallet', 30000, async () => {
+    const methods = await queryAdminDb(
+      `SELECT code, name, icon, kind, min_amount, max_amount, fee_percent
+       FROM wallet_methods WHERE enabled = 1 ORDER BY kind ASC, position ASC`);
+    const presets = await queryAdminDb(
+      `SELECT amount, bonus_percent FROM deposit_presets WHERE enabled = 1 ORDER BY position ASC`);
+    const limits = await adminSetting('wallet_config', {});
+    return { methods, presets, limits };
+  });
+  if (wallet.methods.length) {
+    return res.json({
+      status: "success",
+      data: {
+        balance, currency: "RUB",
+        paymentMethods: wallet.methods
+          .filter(m => m.kind === 'deposit')
+          .map(m => ({ id: m.code, name: m.name, icon: m.icon, min: m.min_amount, max: m.max_amount, feePercent: m.fee_percent })),
+        withdrawMethods: wallet.methods
+          .filter(m => m.kind === 'withdraw')
+          .map(m => ({ id: m.code, name: m.name, icon: m.icon, min: m.min_amount, max: m.max_amount, feePercent: m.fee_percent })),
+        depositPresets: wallet.presets.map(p => ({ amount: p.amount, bonusPercent: p.bonus_percent })),
+        minDeposit: wallet.limits.minDeposit ?? 100,
+        maxDeposit: wallet.limits.maxDeposit ?? 150000,
+        minWithdraw: wallet.limits.minWithdraw ?? 500
+      }
+    });
+  }
   res.json({
     status: "success",
     data: {
