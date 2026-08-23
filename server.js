@@ -24,7 +24,7 @@ const path = require('path');
 const fs = require('fs');
 
 const { SKINS_FILE, ADMIN_DB_PATH } = require('./services/steamSync');
-const { registerAuthRoutes, currentUser, guestUser, verifyJWT, ensureAuthSchema, PUBLIC_URL, ALLOW_MOCK_AUTH } = require('./services/auth');
+const { registerAuthRoutes, attachAuth, currentUser, guestUser, verifyJWT, ensureAuthSchema, PUBLIC_URL, ALLOW_MOCK_AUTH } = require('./services/auth');
 const {
   startWorker: startCatalogWorker,
   stopWorker: stopCatalogWorker,
@@ -37,12 +37,14 @@ const {
   REQUEST_INTERVAL_MS: CATALOG_INTERVAL_MS
 } = require('./services/steamCatalog');
 const {
-  buildDistribution, rollOne, newServerSeed, chancesForDisplay, fairFloat, DEFAULT_RTP
+  buildDistribution, rollOne, pickByRoll, newServerSeed, chancesForDisplay, fairFloat, DEFAULT_RTP
 } = require('./services/drops');
 const { cleanDanglingCaseItems, getCaseHealth, getBrokenCases, MAX_RTP } = require('./services/caseHealth');
 const { verifyMailer } = require('./services/mailer');
 const { makeBattlesService } = require('./services/battles');
 const { makeGiveawaysService } = require('./services/giveaways');
+const { makeInventoryService } = require('./services/inventory');
+const { makeFairnessService } = require('./services/fairness');
 
 // --- Баланс ------------------------------------------------------------------
 // Авторизованному пишем в users.balance, гостю — в mockUser (в памяти).
@@ -141,6 +143,13 @@ app.set('trust proxy', 1);
 // фронт ходит с withCredentials:true, а с '*' браузер такие ответы отбрасывает.
 app.use(cors({ origin: true, credentials: true }));
 app.use(express.json());
+
+// Разбор Bearer-токена ДО объявления всех роутов.
+// Express применяет middleware только к тому, что объявлено ПОСЛЕ него, а
+// registerAuthRoutes вызывается ниже игровых роутов — из-за этого /cases/open,
+// апгрейдер, баттлы и инвентарь не видели req.auth и работали как гость:
+// предметы падали в инвентарь с пустым user_id, транзакции не писались.
+app.use(attachAuth);
 
 // Request logging middleware for API calls
 app.use((req, res, next) => {
@@ -459,6 +468,22 @@ async function adjustBalanceById(userId, delta, txType, comment) {
   }
   return next;
 }
+
+/** Запись транзакции по id пользователя — нужна инвентарю, где нет req. */
+async function recordTransactionById(userId, type, amount, comment) {
+  await ensureTxSchema();
+  await new Promise((resolve) => {
+    const db = getAdminDb();
+    if (!db) return resolve();
+    db.run(`INSERT INTO transactions (user_id, type, amount, comment) VALUES (?, ?, ?, ?)`,
+      [userId, type, amount, comment || ''], () => { db.close(); resolve(); });
+  });
+}
+
+const inventory = makeInventoryService({
+  queryAdminDb, getAdminDb, adjustBalanceById, recordTransactionById, fixImageUrl
+});
+const fairness = makeFairnessService({ queryAdminDb, getAdminDb });
 
 const battles = makeBattlesService({
   queryAdminDb, getAdminDb, getCaseItemsFromDb, getFallbackItems, fixImageUrl
@@ -932,14 +957,16 @@ app.post(['/api/v1/cases/open', '/api/v1/cases/:slug/open'], async (req, res) =>
     }
     let balanceAfter = await adjustBalance(req, mockUser, -totalCost);
 
-    // Честный бросок: результат воспроизводится по (serverSeed, clientSeed, nonce),
-    // в отличие от Math.random(), который проверить нельзя.
-    const { serverSeed, serverHash } = newServerSeed();
-    const clientSeed = String(req.body.clientSeed || crypto.randomBytes(8).toString('hex'));
+    // Честный бросок с ПРЕДВАРИТЕЛЬНОЙ фиксацией сида: хэш серверного сида
+    // опубликован до игры (GET /fair/state), сам сид раскрывается только при
+    // смене пары. Раньше сид генерировался на каждое открытие и тут же
+    // раскрывался — проверить бросок было можно, доказать честность заранее нет.
+    const fair = await fairness.nextRoll(user.id, 'case', quantity);
+    const serverHash = fair.serverHash;
+    const clientSeed = fair.clientSeed;
 
     for (let i = 0; i < quantity; i++) {
-      const rolled = rollOne(distribution, { serverSeed, clientSeed, nonce: i });
-      const winningItem = rolled.item || {
+      const winningItem = pickByRoll(distribution.entries, fair.rolls[i].roll) || {
         id: 0, name: "Кейс пуст", price: 0,
         image: "/assets/battles/winner-boar.png", rarity: "REGULAR", color: "#756767"
       };
@@ -979,9 +1006,15 @@ app.post(['/api/v1/cases/open', '/api/v1/cases/:slug/open'], async (req, res) =>
 
     const winnings = drops.reduce((a, d) => a + (Number(d.price) || 0), 0);
 
-    // Инвентаря в проекте нет, поэтому выигрыш зачисляется на баланс как
-    // мгновенная продажа предмета. Именно это делает RTP реально работающим.
-    balanceAfter = await adjustBalance(req, mockUser, winnings);
+    // Предметы кладём в инвентарь. При AUTO_SELL_WINS=1 сервис сам переведёт
+    // их в деньги — это прежнее поведение, оставлено переключателем.
+    for (const d of drops) {
+      await inventory.award(user.id, {
+        id: d.id, name: d.name, image: d.image, price: d.price,
+        rarity: d.rarity, color: d.color
+      }, { source: 'case', ref: slug });
+    }
+    balanceAfter = await getBalance(req, mockUser);
     await recordTransaction(req, 'case_open', -totalCost, `Открытие: ${c ? c.name : slug} x${quantity}`);
     await recordTransaction(req, 'case_win', winnings, drops.map(d => d.name).join(', ').slice(0, 200));
 
@@ -996,14 +1029,12 @@ app.post(['/api/v1/cases/open', '/api/v1/cases/:slug/open'], async (req, res) =>
         winnings,
         newBalance: balanceAfter,
         balance: balanceAfter,
-        // Проверяемость: sha256(serverSeed) публикуется как serverHash, сам сид
-        // раскрывается сразу — раунды пока не хранятся, поэтому предварительной
-        // фиксации сида нет. Повторить бросок: HMAC_SHA256(serverSeed,
-        // `${clientSeed}:${nonce}`), первые 8 hex / 0x100000000.
+        // serverHash опубликован ДО игры. Сам serverSeed раскрывается при смене
+        // пары сидов (POST /fair/rotate) — тогда все прошлые броски проверяемы
+        // против уже опубликованного хэша.
         serverHash,
-        serverSeed,
         clientSeed,
-        nonce: quantity - 1,
+        nonce: fair.startNonce + quantity - 1,
         rtp: distribution.rtpActual,
         weightsSource: distribution.source
       }
@@ -1029,17 +1060,53 @@ app.get(['/api/v1/user', '/api/v1/user/me', '/api/v1/users/me', '/api/v1/profile
   res.json({ status: "success", data: user || guestUser() });
 });
 
-app.get('/api/v1/user/stats', (req, res) => {
-  res.json({ status: "success", data: { openedCases: 42, wonAmount: 18450, totalBattles: 15 } });
+// Считается по инвентарю и транзакциям игрока, а не выдаётся константой.
+app.get('/api/v1/user/stats', async (req, res) => {
+  const user = (await currentUser(req, mockUser)) || guestUser();
+  if (user.isGuest) {
+    return res.json({ status: "success", data: { openedCases: 0, wonAmount: 0, totalBattles: 0, upgrades: 0, inventoryCount: 0, inventoryValue: 0, bestDrop: null } });
+  }
+  res.json({ status: "success", data: await inventory.userStats(user.id) });
 });
 
 app.get('/api/v1/user/ban-status', (req, res) => {
   res.json({ status: "success", data: { banned: false } });
 });
 
+// Избранное хранится в user_favorites, а не подставляется первым кейсом.
 app.get('/api/v1/user/favorites', async (req, res) => {
-  const cases = await getLiveCases();
-  res.json({ status: "success", data: [cases[0]?.id || "rust-starter"] });
+  const user = (await currentUser(req, mockUser)) || guestUser();
+  if (user.isGuest) return res.json({ status: "success", data: [] });
+  await ensureFavoritesSchema();
+  const rows = await queryAdminDb(
+    `SELECT case_slug FROM user_favorites WHERE user_id = ? ORDER BY id DESC`, [String(user.id)]);
+  res.json({ status: "success", data: rows.map(r => r.case_slug) });
+});
+
+app.post(['/api/v1/user/favorites', '/api/v1/user/favorites/:slug'], async (req, res) => {
+  const user = (await currentUser(req, mockUser)) || guestUser();
+  if (user.isGuest) return res.status(401).json({ status: "error", message: "Нужна авторизация" });
+  const slug = req.params.slug || req.body?.slug;
+  if (!slug) return res.status(400).json({ status: "error", message: "Не указан кейс" });
+  await ensureFavoritesSchema();
+  await new Promise((resolve) => {
+    const db = getAdminDb(); if (!db) return resolve();
+    db.run(`INSERT OR IGNORE INTO user_favorites (user_id, case_slug) VALUES (?, ?)`,
+      [String(user.id), slug], () => { db.close(); resolve(); });
+  });
+  res.json({ status: "success", data: { slug, favorite: true } });
+});
+
+app.delete('/api/v1/user/favorites/:slug', async (req, res) => {
+  const user = (await currentUser(req, mockUser)) || guestUser();
+  if (user.isGuest) return res.status(401).json({ status: "error", message: "Нужна авторизация" });
+  await ensureFavoritesSchema();
+  await new Promise((resolve) => {
+    const db = getAdminDb(); if (!db) return resolve();
+    db.run(`DELETE FROM user_favorites WHERE user_id = ? AND case_slug = ?`,
+      [String(user.id), req.params.slug], () => { db.close(); resolve(); });
+  });
+  res.json({ status: "success", data: { slug: req.params.slug, favorite: false } });
 });
 
 app.put(['/api/v1/user/tradeurl', '/api/v1/user/display-name', '/api/v1/user/avatar'], async (req, res) => {
@@ -1136,8 +1203,24 @@ app.get(['/api/v1/live/recent', '/api/v1/drops/recent'], async (req, res) => {
 });
 
 // Stats
-app.get(['/api/v1/stats/global', '/api/v1/stats'], (req, res) => {
-  res.json({ status: "success", data: mockStats });
+// Реальные счётчики из транзакций. Онлайн считаем по активности за 15 минут,
+// подмешивая базовый фон из BASE_ONLINE, чтобы пустой сайт не выглядел мёртвым.
+app.get(['/api/v1/stats/global', '/api/v1/stats'], async (req, res) => {
+  const data = await cached('globalStats', 30000, async () => {
+    const one = async (sql) => Number((await queryAdminDb(sql))[0]?.v || 0);
+    const opened = await one("SELECT COUNT(*) AS v FROM transactions WHERE type='case_open'");
+    const upgrades = await one("SELECT COUNT(*) AS v FROM transactions WHERE type='upgrade'");
+    const battlesN = await one("SELECT COUNT(*) AS v FROM battles WHERE status='finished'");
+    const active = await one(
+      "SELECT COUNT(DISTINCT user_id) AS v FROM transactions WHERE created_at >= datetime('now','-15 minutes')");
+    return {
+      onlineCount: Number(process.env.BASE_ONLINE || 0) + active,
+      openedCasesCount: opened,
+      upgradesCount: upgrades,
+      battlesCount: battlesN
+    };
+  });
+  res.json({ status: "success", data });
 });
 
 // Deposit chain state
@@ -1502,6 +1585,107 @@ app.post('/api/v1/upgrader/offer/accept', (req, res) => {
 
 
 // Crate PVP / Battles endpoints
+// --- ИНВЕНТАРЬ И ВЫВОД СКИНОВ ------------------------------------------------
+// Пути сняты с бандла (wallet-rLlmihs3.js): фронт уже умеет показывать
+// инвентарь для вывода и список заявок, серверной части не было.
+
+async function requireUser(req, res) {
+  const user = (await currentUser(req, mockUser)) || guestUser();
+  if (user.isGuest) {
+    res.status(401).json({ status: "error", code: "UNAUTHORIZED", message: "Нужна авторизация" });
+    return null;
+  }
+  return user;
+}
+
+app.get(['/api/v1/wallet/skins/withdraw-inventory', '/api/v1/inventory'], async (req, res) => {
+  const user = await requireUser(req, res); if (!user) return;
+  const data = await inventory.list(user.id, { status: req.query.status || 'owned' });
+  res.json({ status: "success", data, items: data.items, total: data.count });
+});
+
+app.post(['/api/v1/inventory/sell', '/api/v1/wallet/skins/sell'], async (req, res) => {
+  const user = await requireUser(req, res); if (!user) return;
+  const r = req.body?.all
+    ? await inventory.sellAll(user.id)
+    : await inventory.sell(user.id, req.body?.ids || req.body?.id);
+  if (r.error) return res.status(400).json({ status: "error", code: r.error, message: r.message });
+  res.json({ status: "success", data: r, message: `Продано предметов: ${r.sold} на ${r.payout} ₽` });
+});
+
+app.post('/api/v1/inventory/:id/sell', async (req, res) => {
+  const user = await requireUser(req, res); if (!user) return;
+  const r = await inventory.sell(user.id, req.params.id);
+  if (r.error) return res.status(400).json({ status: "error", code: r.error, message: r.message });
+  res.json({ status: "success", data: r });
+});
+
+app.post(['/api/v1/wallet/skins/withdraw', '/api/v1/inventory/withdraw'], async (req, res) => {
+  const user = await requireUser(req, res); if (!user) return;
+  const tradeLink = req.body?.tradeLink || user.tradeLink;
+  const r = await inventory.requestWithdraw(user.id, req.body?.ids || req.body?.id, tradeLink);
+  if (r.error) return res.status(400).json({ status: "error", code: r.error, message: r.message });
+  res.json({ status: "success", data: r, message: "Заявка на вывод создана" });
+});
+
+app.get('/api/v1/wallet/skins/withdrawals', async (req, res) => {
+  const user = await requireUser(req, res); if (!user) return;
+  const data = await inventory.listWithdrawals(user.id);
+  res.json({ status: "success", data, items: data, total: data.length });
+});
+
+app.post('/api/v1/wallet/withdrawals/:uid/cancel', async (req, res) => {
+  const user = await requireUser(req, res); if (!user) return;
+  const r = await inventory.cancelWithdraw(user.id, req.params.uid);
+  if (r.error) return res.status(400).json({ status: "error", code: r.error, message: r.message });
+  res.json({ status: "success", data: r, message: "Заявка отменена, предметы вернулись в инвентарь" });
+});
+
+// Стим-инвентарь для пополнения скинами: нужен бот со своей сессией Steam,
+// поэтому отдаём явный отказ, а не пустой список, который выглядит как «пусто».
+app.get('/api/v1/wallet/skins/inventory', async (req, res) => {
+  res.status(501).json({
+    status: "error", code: "NOT_CONNECTED",
+    message: "Пополнение скинами требует Steam-бота с торговой сессией. Он не подключён."
+  });
+});
+
+// --- ЧЕСТНОСТЬ (provably fair) -----------------------------------------------
+
+app.get(['/api/v1/fair/state', '/api/v1/fair/current'], async (req, res) => {
+  const user = await requireUser(req, res); if (!user) return;
+  res.json({ status: "success", data: await fairness.publicState(user.id) });
+});
+
+app.post('/api/v1/fair/client-seed', async (req, res) => {
+  const user = await requireUser(req, res); if (!user) return;
+  const r = await fairness.setClientSeed(user.id, req.body?.clientSeed);
+  if (r.error) return res.status(400).json({ status: "error", code: r.error, message: r.message });
+  res.json({ status: "success", data: r });
+});
+
+app.post('/api/v1/fair/rotate', async (req, res) => {
+  const user = await requireUser(req, res); if (!user) return;
+  const r = await fairness.rotate(user.id);
+  res.json({ status: "success", data: r, message: "Старый серверный сид раскрыт, выдана новая пара" });
+});
+
+app.get('/api/v1/fair/history', async (req, res) => {
+  const user = await requireUser(req, res); if (!user) return;
+  res.json({ status: "success", data: await fairness.history(user.id, 100) });
+});
+
+// Проверка доступна без авторизации: любой может пересчитать чужой бросок.
+app.get(['/api/v1/fair/verify', '/api/v1/fair/check'], (req, res) => {
+  const r = fairness.verify({
+    serverSeed: req.query.serverSeed,
+    clientSeed: req.query.clientSeed,
+    nonce: req.query.nonce
+  });
+  if (r.error) return res.status(400).json({ status: "error", code: r.error, message: r.message });
+  res.json({ status: "success", data: r });
+});
+
 // --- БАТТЛЫ -----------------------------------------------------------------
 
 app.get(['/api/v1/crate-pvp', '/api/v1/battles'], async (req, res) => {

@@ -402,7 +402,7 @@ function issueSession(res, user) {
 function registerAuthRoutes(app, options = {}) {
   const mockUser = options.mockUser || null;
 
-  app.use(attachAuth);
+  // attachAuth подключается в server.js до всех роутов — здесь он не нужен.
 
   // --- Шаг 1: уходим в Steam -----------------------------------------------
   app.get('/api/v1/auth/steam', (req, res) => {
