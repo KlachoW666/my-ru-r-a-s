@@ -22,6 +22,7 @@ const https = require('https');
 const sqlite3 = require('sqlite3').verbose();
 
 const { ADMIN_DB_PATH, getSteamPlayerSummary } = require('./steamSync');
+const { registerEmailRoutes } = require('./emailAuth');
 
 // ---------------------------------------------------------------------------
 // Конфигурация
@@ -381,6 +382,23 @@ function safeRedirectTarget(candidate) {
   }
 }
 
+/**
+ * Единая выдача сессии: refresh в httpOnly-cookie, access — в ответе.
+ * Одна и та же и для Steam, и для входа по e-mail, чтобы фронт не различал их.
+ */
+function issueSession(res, user) {
+  const claims = {
+    sub: String(user.id),
+    steamId: user.steamId || null,
+    username: user.username,
+    role: user.role || 'user'
+  };
+  const accessToken = signJWT(claims, ACCESS_TTL);
+  const refreshToken = signJWT({ ...claims, typ: 'refresh' }, REFRESH_TTL);
+  res.cookie(REFRESH_COOKIE, refreshToken, cookieOptions(REFRESH_TTL * 1000));
+  return { accessToken, refreshToken };
+}
+
 function registerAuthRoutes(app, options = {}) {
   const mockUser = options.mockUser || null;
 
@@ -454,24 +472,20 @@ function registerAuthRoutes(app, options = {}) {
     res.json({ status: 'success', message: 'Выход выполнен' });
   });
 
-  // Заглушки для e-mail/OAuth-веток: фронт их зовёт, но реализации нет.
-  // Отдаём осмысленную ошибку, а не «успех» с моковым токеном.
-  app.all(
-    [
-      '/api/v1/auth/login/email',
-      '/api/v1/auth/register/email',
-      '/api/v1/auth/verify/email',
-      '/api/v1/auth/resend-verification',
-      '/api/v1/auth/password-reset/request',
-      '/api/v1/auth/password-reset/confirm'
-    ],
-    (_req, res) => {
-      res.status(501).json({ status: 'error', message: 'Вход по e-mail пока не подключён. Используйте вход через Steam.' });
-    }
-  );
-
-  app.get('/api/v1/auth/email/exists', (_req, res) => {
-    res.json({ status: 'success', data: { exists: false } });
+  // Вход и регистрация по e-mail — services/emailAuth.js.
+  // Сессию выдаёт та же issueSession, что и Steam, поэтому форма ответа и
+  // refresh-cookie одинаковые для обоих способов входа.
+  registerEmailRoutes(app, {
+    openDb,
+    run,
+    get,
+    toPublicUser,
+    issueSession: (res, user) => issueSession(res, {
+      id: user.id,
+      steamId: user.steam_id || null,
+      username: user.username,
+      role: user.role || 'user'
+    })
   });
 }
 
@@ -521,6 +535,7 @@ async function currentUser(req, mockUser) {
 
 module.exports = {
   registerAuthRoutes,
+  issueSession,
   attachAuth,
   requireAuth,
   currentUser,
