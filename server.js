@@ -16,6 +16,7 @@ function fixImageUrl(img) {
   return img;
 }
 const express = require('express');
+const crypto = require('crypto');
 const http = require('http');
 const { WebSocketServer } = require('ws');
 const cors = require('cors');
@@ -35,6 +36,77 @@ const {
   PAGE_SIZE: CATALOG_PAGE_SIZE,
   REQUEST_INTERVAL_MS: CATALOG_INTERVAL_MS
 } = require('./services/steamCatalog');
+const {
+  buildDistribution, rollOne, newServerSeed, chancesForDisplay, DEFAULT_RTP
+} = require('./services/drops');
+const { cleanDanglingCaseItems, getCaseHealth, getBrokenCases, MAX_RTP } = require('./services/caseHealth');
+
+// --- Баланс ------------------------------------------------------------------
+// Авторизованному пишем в users.balance, гостю — в mockUser (в памяти).
+// Это убирает прежнее поведение, когда баланс жил только в памяти процесса и
+// сбрасывался при каждом рестарте.
+
+async function getBalance(req, mockUser) {
+  if (req.auth && !req.auth.mock) {
+    const rows = await queryAdminDb(`SELECT balance FROM users WHERE id = ?`, [req.auth.sub]);
+    if (rows.length) return Number(rows[0].balance) || 0;
+  }
+  return Number(mockUser.balance) || 0;
+}
+
+/**
+ * История операций. Таблицы transactions в схеме админки не было — создаём
+ * идемпотентно, как ensureAuthSchema. Гостевые операции не пишем: у гостя нет
+ * строки в users, и привязать их не к чему.
+ */
+let txSchemaReady = false;
+async function ensureTxSchema() {
+  if (txSchemaReady) return;
+  await new Promise((resolve) => {
+    const db = getAdminDb();
+    if (!db) return resolve();
+    db.run(`CREATE TABLE IF NOT EXISTS transactions (
+      id INTEGER PRIMARY KEY AUTOINCREMENT,
+      user_id INTEGER,
+      type TEXT,
+      amount REAL,
+      comment TEXT,
+      created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
+    )`, () => {
+      db.run(`CREATE INDEX IF NOT EXISTS idx_tx_user ON transactions(user_id, created_at)`, () => {
+        db.close(); resolve();
+      });
+    });
+  });
+  txSchemaReady = true;
+}
+
+async function recordTransaction(req, type, amount, comment = '') {
+  if (!req.auth || req.auth.mock) return;
+  await ensureTxSchema();
+  await new Promise((resolve) => {
+    const db = getAdminDb();
+    if (!db) return resolve();
+    db.run(`INSERT INTO transactions (user_id, type, amount, comment) VALUES (?, ?, ?, ?)`,
+      [req.auth.sub, type, amount, comment], () => { db.close(); resolve(); });
+  });
+}
+
+/** Меняет баланс на delta. min — нижняя граница, ниже которой списание не идёт. */
+async function adjustBalance(req, mockUser, delta) {
+  const current = await getBalance(req, mockUser);
+  const next = Math.max(0, +(current + delta).toFixed(2));
+  if (req.auth && !req.auth.mock) {
+    await new Promise((resolve) => {
+      const db = getAdminDb();
+      if (!db) return resolve();
+      db.run(`UPDATE users SET balance = ? WHERE id = ?`, [next, req.auth.sub], () => { db.close(); resolve(); });
+    });
+  } else {
+    mockUser.balance = next;
+  }
+  return next;
+}
 
 // --- Кэш ответов в памяти -------------------------------------------------
 // Сайт читает каталог из SQLite, а не из Steam, поэтому единственное, что тут
@@ -470,6 +542,20 @@ app.post(['/api/v1/admin/sync-skins', '/api/v1/skins/sync'], async (req, res) =>
   }
 });
 
+// Целостность кейсов: какие настроены неверно и почему.
+app.get(['/api/v1/admin/cases/health', '/api/v1/cases/health'], async (req, res) => {
+  const health = await getCaseHealth();
+  res.json({
+    status: "success",
+    data: {
+      total: health.length,
+      broken: health.filter(c => !c.ok).length,
+      maxRtp: MAX_RTP,
+      cases: health
+    }
+  });
+});
+
 // Прогресс синхронизации — для админки и для проверки руками.
 app.get(['/api/v1/skins/status', '/api/v1/admin/sync-skins/status'], (req, res) => {
   const st = getCatalogStatus();
@@ -600,13 +686,25 @@ app.get('/api/v1/cases/:slug', async (req, res) => {
       secret: c ? c.isSecret === 1 : false
     };
 
-    const items = await getCaseItemsFromDb(c ? c.id : null);
+    let items = await getCaseItemsFromDb(c ? c.id : null);
+    if (!items || items.length === 0) items = await getFallbackItems();
+
+    // Показываем РЕАЛЬНЫЕ шансы — те же веса, по которым идёт розыгрыш в
+    // /cases/open. Раньше отдавался сырой chance из БД (везде 0 → подставлялось
+    // 10%), а разыгрывалось равновероятно: цифры на экране не совпадали с игрой.
+    const user = await currentUser(req, mockUser);
+    const dist = buildDistribution(items, {
+      casePrice: caseObj.price,
+      rtp: Number(user && user.rtp) || DEFAULT_RTP
+    });
+    const chanceById = new Map(chancesForDisplay(dist).map(c => [String(c.id), c.chance]));
+    items = items.map(it => ({ ...it, chance: chanceById.get(String(it.id)) ?? it.chance }));
 
     res.json({
       status: "success",
       data: {
-        case: caseObj,
-        items: items && items.length > 0 ? items : await getFallbackItems()
+        case: { ...caseObj, rtp: dist.rtpActual },
+        items
       }
     });
   } catch (e) {
@@ -662,7 +760,12 @@ async function getCaseItemsFromDb(caseId) {
         image: fixImageUrl(r.image),
         rarity: mapRarity(r.rarity),
         color: r.color ? (r.color.startsWith('#') ? r.color : `#${r.color}`) : "#eb4b4b",
-        chance: r.chance || 10
+        // Ноль здесь означает «в админке шанс не задан», и buildDistribution
+        // посчитает веса от цены кейса и RTP. Прежняя подстановка 10 по
+        // умолчанию делала все предметы равновероятными и ломала отдачу.
+        chance: Number(r.chance) || 0,
+        ticketRangeFrom: Number(r.ticketRangeFrom) || 0,
+        ticketRangeTo: Number(r.ticketRangeTo) || 0
       }));
     }
   }
@@ -680,15 +783,15 @@ async function getFallbackItems() {
       image: fixImageUrl(it.image),
       rarity: mapRarity(it.rarity),
       color: it.colorHex || it.color || "#eb4b4b",
-      chance: 10
+      chance: 0
     }));
   }
   return [
-    { id: 1, name: "AK-47 | Tempered", price: 4500, image: "/assets/battles/winner-boar.png", rarity: "GOLD", color: "#eb4b4b", chance: 10 },
-    { id: 2, name: "LR-300 | Victoria", price: 1200, image: "/assets/battles/boar-ready.png", rarity: "VIOLET", color: "#a33ee2", chance: 15 },
-    { id: 3, name: "MP5 | Cold Hunter", price: 350, image: "/assets/header/logo.webp", rarity: "RARE", color: "#65dc04", chance: 25 },
-    { id: 4, name: "Metal Facemask", price: 850, image: "/assets/battles/winner-boar.png", rarity: "VIOLET", color: "#a33ee2", chance: 20 },
-    { id: 5, name: "Whiteout Semi-Automatic Pistol", price: 2400, image: "/assets/header/logo.webp", rarity: "UNUSUAL", color: "#4076ff", chance: 30 }
+    { id: 1, name: "AK-47 | Tempered", price: 4500, image: "/assets/battles/winner-boar.png", rarity: "GOLD", color: "#eb4b4b", chance: 0 },
+    { id: 2, name: "LR-300 | Victoria", price: 1200, image: "/assets/battles/boar-ready.png", rarity: "VIOLET", color: "#a33ee2", chance: 0 },
+    { id: 3, name: "MP5 | Cold Hunter", price: 350, image: "/assets/header/logo.webp", rarity: "RARE", color: "#65dc04", chance: 0 },
+    { id: 4, name: "Metal Facemask", price: 850, image: "/assets/battles/winner-boar.png", rarity: "VIOLET", color: "#a33ee2", chance: 0 },
+    { id: 5, name: "Whiteout Semi-Automatic Pistol", price: 2400, image: "/assets/header/logo.webp", rarity: "UNUSUAL", color: "#4076ff", chance: 0 }
   ];
 }
 
@@ -702,22 +805,55 @@ app.post(['/api/v1/cases/open', '/api/v1/cases/:slug/open'], async (req, res) =>
     const casePrice = c ? (c.price || 49) : 49;
     const totalCost = casePrice * quantity;
 
-    if (mockUser.balance >= totalCost) {
-      mockUser.balance -= totalCost;
-    }
+    const user = (await currentUser(req, mockUser)) || guestUser();
 
     const items = await getCaseItemsFromDb(c ? c.id : null);
     const drops = [];
     const nowSec = Math.floor(Date.now() / 1000);
 
+    // Взвешенный розыгрыш вместо равновероятного выбора.
+    // Веса берутся из ticketRange, если он заполнен; иначе из chance;
+    // иначе считаются от цены кейса и RTP игрока (см. services/drops.js).
+    const rtp = Number(user && user.rtp) || DEFAULT_RTP;
+    const distribution = buildDistribution(items, { casePrice, rtp });
+
+    // ВАЖЕН ПОРЯДОК: сначала проверяем сам кейс, и только потом трогаем деньги.
+    // Иначе за отклонённое открытие всё равно списывалась цена кейса.
+    //
+    // Защита от заведомо убыточного кейса. Возникает, когда состав кейса битый:
+    // например, из шести предметов пять ссылались на удалённые строки items, и
+    // оставался один за 15 400 ₽ в кейсе за 499 ₽ — отдача 3086%.
+    if (distribution.entries.length === 0 || distribution.rtpActual > MAX_RTP) {
+      console.error(`[Cases] Кейс "${slug}" настроен неверно: предметов ${distribution.entries.length}, отдача ${distribution.rtpActual}%`);
+      return res.status(409).json({
+        status: "error",
+        code: "CASE_MISCONFIGURED",
+        message: distribution.entries.length === 0
+          ? "В кейсе нет доступных предметов. Проверьте состав в админке."
+          : `Отдача кейса ${distribution.rtpActual}% при пороге ${MAX_RTP}%. Открытие заблокировано — проверьте состав в админке.`,
+        data: { itemsAvailable: distribution.entries.length, rtp: distribution.rtpActual, maxRtp: MAX_RTP }
+      });
+    }
+
+    const balanceBefore = await getBalance(req, mockUser);
+    if (balanceBefore < totalCost) {
+      return res.status(400).json({
+        status: "error", code: "INSUFFICIENT_BALANCE",
+        message: `Недостаточно средств: нужно ${totalCost} ₽, на балансе ${balanceBefore} ₽`
+      });
+    }
+    let balanceAfter = await adjustBalance(req, mockUser, -totalCost);
+
+    // Честный бросок: результат воспроизводится по (serverSeed, clientSeed, nonce),
+    // в отличие от Math.random(), который проверить нельзя.
+    const { serverSeed, serverHash } = newServerSeed();
+    const clientSeed = String(req.body.clientSeed || crypto.randomBytes(8).toString('hex'));
+
     for (let i = 0; i < quantity; i++) {
-      const winningItem = items.length > 0 ? items[Math.floor(Math.random() * items.length)] : {
-        id: 9,
-        name: "Dragon Lore Bolt Rifle",
-        price: 18500,
-        image: "https://community.cloudflare.steamstatic.com/economy/image/-9a81dlDragonLore",
-        rarity: "GOLD",
-        color: "#eb4b4b"
+      const rolled = rollOne(distribution, { serverSeed, clientSeed, nonce: i });
+      const winningItem = rolled.item || {
+        id: 0, name: "Кейс пуст", price: 0,
+        image: "/assets/battles/winner-boar.png", rarity: "REGULAR", color: "#756767"
       };
 
       // Реальное открытие попадает в живую ленту и вытесняет синтетику.
@@ -729,7 +865,7 @@ app.post(['/api/v1/cases/open', '/api/v1/cases/:slug/open'], async (req, res) =>
           rarity: winningItem.rarity,
           colorHex: winningItem.color
         },
-        user: { id: mockUser.id, name: mockUser.username, avatar: mockUser.avatar },
+        user: { id: user.id, name: user.username, avatar: user.avatar },
         eventType: 'CASE',
         caseSlug: slug,
         caseImage: c ? c.image : null,
@@ -747,21 +883,41 @@ app.post(['/api/v1/cases/open', '/api/v1/cases/:slug/open'], async (req, res) =>
         price: winningItem.price,
         rarity: winningItem.rarity || "GOLD",
         color: winningItem.color ? winningItem.color.replace('#', '') : "eb4b4b",
-        userId: mockUser.id,
-        userName: mockUser.username,
+        userId: user.id,
+        userName: user.username,
         openedAt: nowSec
       });
     }
+
+    const winnings = drops.reduce((a, d) => a + (Number(d.price) || 0), 0);
+
+    // Инвентаря в проекте нет, поэтому выигрыш зачисляется на баланс как
+    // мгновенная продажа предмета. Именно это делает RTP реально работающим.
+    balanceAfter = await adjustBalance(req, mockUser, winnings);
+    await recordTransaction(req, 'case_open', -totalCost, `Открытие: ${c ? c.name : slug} x${quantity}`);
+    await recordTransaction(req, 'case_win', winnings, drops.map(d => d.name).join(', ').slice(0, 200));
 
     res.json({
       status: "success",
       data: {
         gameId: Date.now(),
+        // Фронт читает openResult.items и openResult.winnings (index-B3loti9-.js).
+        // drops оставлен как совместимый дубль.
+        items: drops,
         drops: drops,
-        newBalance: mockUser.balance,
-        serverHash: "server_hash_" + Date.now(),
-        clientSeed: "client_seed_" + Date.now(),
-        nonce: 1
+        winnings,
+        newBalance: balanceAfter,
+        balance: balanceAfter,
+        // Проверяемость: sha256(serverSeed) публикуется как serverHash, сам сид
+        // раскрывается сразу — раунды пока не хранятся, поэтому предварительной
+        // фиксации сида нет. Повторить бросок: HMAC_SHA256(serverSeed,
+        // `${clientSeed}:${nonce}`), первые 8 hex / 0x100000000.
+        serverHash,
+        serverSeed,
+        clientSeed,
+        nonce: quantity - 1,
+        rtp: distribution.rtpActual,
+        weightsSource: distribution.source
       }
     });
   } catch (e) {
@@ -1078,11 +1234,12 @@ app.post(['/api/v1/battles/:id/join', '/api/v1/battles/:id/add-bot'], (req, res)
 });
 
 // Wallet & Deposit endpoints
-app.get(['/api/v1/wallet', '/api/v1/wallet/config'], (req, res) => {
+app.get(['/api/v1/wallet', '/api/v1/wallet/config'], async (req, res) => {
+  const balance = await getBalance(req, mockUser);
   res.json({
     status: "success",
     data: {
-      balance: mockUser.balance,
+      balance,
       currency: "RUB",
       paymentMethods: [
         { id: "card", name: "Банковская карта RUB", icon: "/assets/wallet/pm-cards.svg" },
@@ -1093,31 +1250,63 @@ app.get(['/api/v1/wallet', '/api/v1/wallet/config'], (req, res) => {
   });
 });
 
-app.get('/api/v1/wallet/transactions', (req, res) => {
+app.get('/api/v1/wallet/transactions', async (req, res) => {
+  if (!req.auth || req.auth.mock) return res.json({ status: 'success', data: [] });
+  await ensureTxSchema();
+  const rows = await queryAdminDb(
+    'SELECT * FROM transactions WHERE user_id = ? ORDER BY created_at DESC, id DESC LIMIT 100',
+    [req.auth.sub]);
   res.json({
-    status: "success",
-    data: [
-      { id: "tx-1", type: "deposit", amount: 1000, status: "completed", date: new Date().toISOString() },
-      { id: "tx-2", type: "case_open", amount: -49, status: "completed", date: new Date().toISOString() }
-    ]
+    status: 'success',
+    data: rows.map(r => ({
+      id: 'tx-' + r.id,
+      type: r.type,
+      amount: r.amount,
+      comment: r.comment || '',
+      status: 'completed',
+      date: r.created_at
+    }))
   });
 });
 
-app.post('/api/v1/wallet/deposit/card', (req, res) => {
-  const amount = req.body.amount || 500;
-  mockUser.balance += amount;
+app.post(['/api/v1/wallet/deposit/card', '/api/v1/wallet/deposit'], async (req, res) => {
+  const amount = Math.round(Number(req.body.amount) || 500);
+  if (amount <= 0 || amount > 500000) {
+    return res.status(400).json({ status: 'error', message: 'Некорректная сумма пополнения' });
+  }
+  // Платёжного провайдера нет — зачисляем сразу. Реальная интеграция должна
+  // зачислять только по вебхуку об успешной оплате.
+  const newBalance = await adjustBalance(req, mockUser, amount);
+  await recordTransaction(req, 'deposit', amount, 'Пополнение картой');
   res.json({
-    status: "success",
+    status: 'success',
     data: {
-      url: "http://localhost:3030/wallet",
-      newBalance: mockUser.balance,
-      message: `Пополнение на ${amount} ₽ прошло успешно!`
+      url: `${PUBLIC_URL}/wallet`,
+      newBalance,
+      balance: newBalance,
+      message: `Пополнение на ${amount} ₽ прошло успешно`
     }
   });
 });
 
-app.post('/api/v1/wallet/withdraw', (req, res) => {
-  res.json({ status: "success", message: "Заявка на вывод создана успешно" });
+app.post('/api/v1/wallet/withdraw', async (req, res) => {
+  const amount = Math.round(Number(req.body.amount) || 0);
+  if (amount <= 0) return res.status(400).json({ status: 'error', message: 'Некорректная сумма вывода' });
+  const balance = await getBalance(req, mockUser);
+  if (balance < amount) {
+    return res.status(400).json({ status: 'error', code: 'INSUFFICIENT_BALANCE',
+      message: `Недостаточно средств: на балансе ${balance} ₽` });
+  }
+  const newBalance = await adjustBalance(req, mockUser, -amount);
+  await recordTransaction(req, 'withdraw', -amount, 'Заявка на вывод');
+  if (req.auth && !req.auth.mock) {
+    await new Promise((resolve) => {
+      const db = getAdminDb(); if (!db) return resolve();
+      db.run(`INSERT INTO withdrawals (user_id, amount, currency, status) VALUES (?, ?, 'RUB', 'pending')`,
+        [req.auth.sub, amount], () => { db.close(); resolve(); });
+    });
+  }
+  res.json({ status: 'success', data: { newBalance, balance: newBalance }, message: 'Заявка на вывод создана' });
 });
 
 // Wildcard API fallback
@@ -1211,6 +1400,17 @@ wss.on('connection', (ws) => {
 
 server.listen(PORT, async () => {
   await ensureAuthSchema();
+
+  // Чистим связи кейсов, ведущие на удалённые предметы, и предупреждаем о
+  // кейсах, которые в текущем виде открывать нельзя.
+  await cleanDanglingCaseItems();
+  const broken = await getBrokenCases();
+  if (broken.length) {
+    console.warn(`[Cases] Настроены неверно: ${broken.length} из открытых кейсов`);
+    broken.forEach(c => console.warn(`   • ${c.slug} (${c.price} ₽): ${c.problems.join('; ')}`));
+    console.warn(`   Открытие таких кейсов блокируется. Состав правится в админке.`);
+  }
+
 
   // Фоновый обход каталога Steam. Отключается STEAM_CATALOG_SYNC=0.
   const catalogEnabled = process.env.STEAM_CATALOG_SYNC !== '0';
