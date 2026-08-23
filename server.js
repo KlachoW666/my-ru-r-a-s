@@ -37,7 +37,7 @@ const {
   REQUEST_INTERVAL_MS: CATALOG_INTERVAL_MS
 } = require('./services/steamCatalog');
 const {
-  buildDistribution, rollOne, newServerSeed, chancesForDisplay, DEFAULT_RTP
+  buildDistribution, rollOne, newServerSeed, chancesForDisplay, fairFloat, DEFAULT_RTP
 } = require('./services/drops');
 const { cleanDanglingCaseItems, getCaseHealth, getBrokenCases, MAX_RTP } = require('./services/caseHealth');
 
@@ -1136,20 +1136,151 @@ app.get(['/api/v1/upgrader/items', '/api/v1/upgrader'], async (req, res) => {
   });
 });
 
+// Апгрейдер.
+//
+// Было: won = Math.random() > 0.4 — ровно 60% побед независимо от множителя и
+// ставки, а выигрышем всегда назначался skins[0], самый дорогой предмет
+// каталога (118 700 руб). То есть игра не зависела ни от одного действия игрока.
+//
+// Контракт снят с бандла (landing-mLe--Uh6.js):
+//   запрос : { itemIds: [...], betAmount }
+//   ответ  : { upgradeId, won, chance, betAmount, totalItemsValue, winAmount,
+//              items, bestItem, ticket, serverSeed, serverSeedHash, nonce,
+//              createdAt, creditPending }
+// Оттуда же константы фронта: множители [2,4,5], RTP 0.95, минимальный шанс 1%,
+// множитель от 1.05 до 100. chance — доля от 0 до 1 (гейдж умножает на 100).
+//
+// Формула: chance = (ставка / стоимость цели) * RTP.
+// При этом ожидание = chance * цель = ставка * RTP, то есть отдача равна RTP
+// при любом множителе — игрок не может выбрать «выгодный» множитель.
+const UPGRADER_RTP = Number(process.env.UPGRADER_RTP || 0.95);
+const UPGRADER_MIN_CHANCE = 0.01;
+const UPGRADER_MAX_CHANCE = 0.95;
+const UPGRADER_MIN_MULT = 1.05;
+const UPGRADER_MAX_MULT = 100;
+
 app.post('/api/v1/upgrader/place', async (req, res) => {
-  const skins = await getLiveItems();
-  const won = Math.random() > 0.4;
-  const targetItem = skins[0];
-  if (won) mockUser.balance += targetItem.price;
-  res.json({
-    status: "success",
-    data: {
-      win: won,
-      roll: won ? 85.5 : 12.3,
-      item: targetItem,
-      newBalance: mockUser.balance
+  try {
+    const body = req.body || {};
+    const itemIds = Array.isArray(body.itemIds) ? body.itemIds : [];
+    const catalog = await getLiveItems();
+    const byId = new Map(catalog.map(i => [String(i.id), i]));
+
+    // Ставка: сумма выбранных предметов; если предметы не переданы —
+    // betAmount как сумма в рублях.
+    const wagered = itemIds.map(id => byId.get(String(id))).filter(Boolean);
+    const itemsValue = wagered.reduce((a, i) => a + (Number(i.price) || 0), 0);
+    const rawBet = Number(body.betAmount);
+
+    // betAmount у фронта используется и как множитель (1.05..100), и как сумма.
+    // Различаем по наличию выбранных предметов: с предметами это множитель.
+    let betAmount;
+    let targetValue;
+    const explicitTarget = body.targetItemId != null ? byId.get(String(body.targetItemId)) : null;
+
+    if (explicitTarget) {
+      betAmount = itemsValue > 0 ? itemsValue : (Number.isFinite(rawBet) ? rawBet : 0);
+      targetValue = Number(explicitTarget.price) || 0;
+    } else if (itemsValue > 0 && Number.isFinite(rawBet) && rawBet >= UPGRADER_MIN_MULT && rawBet <= UPGRADER_MAX_MULT) {
+      betAmount = itemsValue;
+      targetValue = itemsValue * rawBet;
+    } else {
+      betAmount = itemsValue > 0 ? itemsValue : (Number.isFinite(rawBet) ? rawBet : 0);
+      const mult = Number(body.multiplier) || 2;
+      targetValue = betAmount * Math.min(Math.max(mult, UPGRADER_MIN_MULT), UPGRADER_MAX_MULT);
     }
-  });
+
+    if (!(betAmount > 0) || !(targetValue > 0)) {
+      return res.status(400).json({
+        status: "error", code: "INVALID_UPGRADE",
+        message: "Не выбраны предметы или не задан множитель"
+      });
+    }
+    if (targetValue < betAmount * UPGRADER_MIN_MULT) {
+      return res.status(400).json({
+        status: "error", code: "INVALID_MULTIPLIER",
+        message: `Множитель должен быть не меньше ${UPGRADER_MIN_MULT}`
+      });
+    }
+
+    const balanceBefore = await getBalance(req, mockUser);
+    if (balanceBefore < betAmount) {
+      return res.status(400).json({
+        status: "error", code: "INSUFFICIENT_BALANCE",
+        message: `Недостаточно средств: нужно ${Math.round(betAmount)} руб, на балансе ${balanceBefore} руб`
+      });
+    }
+
+    const chance = Math.min(UPGRADER_MAX_CHANCE,
+      Math.max(UPGRADER_MIN_CHANCE, (betAmount / targetValue) * UPGRADER_RTP));
+
+    // Тот же честный бросок, что и в кейсах.
+    const { serverSeed, serverHash } = newServerSeed();
+    const clientSeed = String(body.clientSeed || crypto.randomBytes(8).toString('hex'));
+    const nonce = Date.now() % 1000000;
+    const ticket = fairFloat(serverSeed, clientSeed, nonce);
+    const won = ticket < chance;
+
+    // Предмет-цель: ближайший по стоимости из каталога, а не skins[0].
+    let bestItem = explicitTarget;
+    if (!bestItem) {
+      bestItem = catalog.reduce((best, i) => {
+        const d = Math.abs((Number(i.price) || 0) - targetValue);
+        return !best || d < Math.abs((Number(best.price) || 0) - targetValue) ? i : best;
+      }, null);
+    }
+
+    let balanceAfter = await adjustBalance(req, mockUser, -betAmount);
+    const winAmount = won ? Math.round(targetValue) : 0;
+    if (won) balanceAfter = await adjustBalance(req, mockUser, winAmount);
+
+    await recordTransaction(req, 'upgrade', -Math.round(betAmount), `Апгрейд x${(targetValue / betAmount).toFixed(2)}`);
+    if (won) await recordTransaction(req, 'upgrade_win', winAmount, bestItem ? bestItem.name : '');
+
+    if (won && bestItem) {
+      const user = (await currentUser(req, mockUser)) || guestUser();
+      pushLiveDrop(makeWin({
+        item: { name: bestItem.name, price: winAmount, image: bestItem.image, rarity: bestItem.rarity, colorHex: bestItem.colorHex },
+        user: { id: user.id, name: user.username, avatar: user.avatar },
+        eventType: 'UPGRADER',
+        betAmount: Math.round(betAmount),
+        multiplier: +(targetValue / betAmount).toFixed(2),
+        wonAt: Math.floor(Date.now() / 1000)
+      }));
+    }
+
+    res.json({
+      status: "success",
+      data: {
+        upgradeId: `upg-${Date.now()}-${nonce}`,
+        won,
+        chance: +chance.toFixed(6),
+        ticket: +ticket.toFixed(6),
+        betAmount: Math.round(betAmount),
+        totalItemsValue: Math.round(itemsValue || betAmount),
+        winAmount,
+        multiplier: +(targetValue / betAmount).toFixed(2),
+        items: won && bestItem ? [{
+          id: bestItem.id, name: bestItem.name, image: bestItem.image,
+          price: winAmount, rarity: bestItem.rarity, color: bestItem.colorHex
+        }] : [],
+        bestItem: bestItem ? {
+          id: bestItem.id, name: bestItem.name, image: bestItem.image,
+          price: Math.round(targetValue), rarity: bestItem.rarity, color: bestItem.colorHex
+        } : null,
+        serverSeed,
+        serverSeedHash: serverHash,
+        nonce,
+        createdAt: new Date().toISOString(),
+        creditPending: false,
+        newBalance: balanceAfter,
+        balance: balanceAfter
+      }
+    });
+  } catch (e) {
+    console.error('POST /upgrader/place error:', e);
+    res.status(500).json({ status: "error", message: e.message });
+  }
 });
 
 app.post('/api/v1/upgrader/offer/accept', (req, res) => {
