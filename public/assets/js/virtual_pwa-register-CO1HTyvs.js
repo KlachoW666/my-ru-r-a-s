@@ -1,1 +1,9 @@
-import{_ as e}from"./index-CyyoIbm1.js";import"./vendor-vNcy1sFx.js";function t(t={}){const{immediate:i=!1,onNeedRefresh:n,onOfflineReady:r,onRegistered:o,onRegisteredSW:s,onRegisterError:a}=t;let d,c;return c=async function(){if("serviceWorker"in navigator){if(d=await e(async()=>{const{Workbox:e}=await import("./workbox-window.prod.es5-CLYUWRvB.js");return{Workbox:e}},[]).then(({Workbox:e})=>new e("/sw.js",{scope:"/",type:"classic"})).catch(e=>{a?.(e)}),!d)return;d.addEventListener("activated",e=>{(e.isUpdate||e.isExternal)&&window.location.reload()}),d.addEventListener("installed",e=>{e.isUpdate||r?.()}),d.register({immediate:i}).then(e=>{s?s("/sw.js",e):o?.(e)}).catch(e=>{a?.(e)})}}(),async(e=!0)=>{await c}}export{t as registerSW};
+if ('serviceWorker' in navigator) {
+  navigator.serviceWorker.getRegistrations().then(regs => {
+    for (let reg of regs) reg.unregister();
+  });
+  if (typeof caches !== 'undefined') {
+    caches.keys().then(keys => keys.forEach(k => caches.delete(k)));
+  }
+}
+export function registerSW() {}

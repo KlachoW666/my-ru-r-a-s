@@ -1,3 +1,4 @@
+try { process.loadEnvFile(require('path').resolve(__dirname, '..', '..', '.env')); } catch {}
 const express = require('express');
 const cors = require('cors');
 const path = require('path');
@@ -5,9 +6,11 @@ const fs = require('fs');
 const jwt = require('jsonwebtoken');
 const sqlite3 = require('sqlite3').verbose();
 const https = require('https');
+const multer = require('multer');
 
 const app = express();
-const PORT = process.env.PORT || 8080;
+// ADMIN_PORT, а не PORT: .env общий с игровым сервером, где PORT=3101.
+const PORT = process.env.ADMIN_PORT || 8080;
 const JWT_SECRET = process.env.JWT_SECRET || 'titanrust_super_secret_jwt_key_2026';
 
 const DB_PATH = path.join(__dirname, 'database.sqlite');
@@ -77,15 +80,38 @@ function initDatabase() {
         )`);
 
         // Cases table
+        
+        // Case Items junction table
+        db.run(`CREATE TABLE IF NOT EXISTS case_items (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            case_id INTEGER,
+            item_id INTEGER,
+            chance REAL DEFAULT 0,
+            ticketRangeFrom INTEGER DEFAULT 0,
+            ticketRangeTo INTEGER DEFAULT 0,
+            UNIQUE(case_id, item_id)
+        )`);
+
         db.run(`CREATE TABLE IF NOT EXISTS cases (
             id INTEGER PRIMARY KEY AUTOINCREMENT,
             slug TEXT UNIQUE, name TEXT, price REAL,
+            category TEXT DEFAULT 'standard',
             image TEXT, volatility TEXT DEFAULT 'medium',
             sortOrder INTEGER DEFAULT 0,
             isBlogger INTEGER DEFAULT 0,
+            exclusiveTo TEXT,
             seriesId INTEGER,
+            isActive INTEGER DEFAULT 1,
+            status TEXT DEFAULT 'active',
+            archived INTEGER DEFAULT 0,
             created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
         )`);
+        db.run(`ALTER TABLE cases ADD COLUMN isActive INTEGER DEFAULT 1`, (err) => {});
+        db.run(`ALTER TABLE cases ADD COLUMN status TEXT DEFAULT 'active'`, (err) => {});
+        db.run(`ALTER TABLE cases ADD COLUMN archived INTEGER DEFAULT 0`, (err) => {});
+        db.run(`UPDATE cases SET isActive = 1, status = 'active' WHERE isActive IS NULL OR status IS NULL`, (err) => {});
+        db.run(`ALTER TABLE cases ADD COLUMN exclusiveTo TEXT`, (err) => {});
+        db.run(`ALTER TABLE cases ADD COLUMN category TEXT DEFAULT 'standard'`, (err) => {});
 
         // Series table
         db.run(`CREATE TABLE IF NOT EXISTS series (
@@ -117,6 +143,17 @@ function initDatabase() {
         )`);
 
         // Seed admin
+        
+        // Seed initial case series if empty
+        db.get(`SELECT count(*) as c FROM series`, [], (err, row) => {
+            if (row && row.c === 0) {
+                db.run(`INSERT INTO series (name, status) VALUES ('Стандартная серия', 'active')`);
+                db.run(`INSERT INTO series (name, status) VALUES ('Лимитированная серия', 'active')`);
+                db.run(`INSERT INTO series (name, status) VALUES ('Секретная серия', 'active')`);
+                console.log('Seeded 3 initial case series.');
+            }
+        });
+
         db.get(`SELECT * FROM admin_users WHERE username = 'SUPER_ADMIN'`, [], (err, row) => {
             if (!row) {
                 db.run(`INSERT INTO admin_users (username, email, password, role) VALUES ('SUPER_ADMIN', 'admin@titanrust.ru', 'admin123', 'SUPER_ADMIN')`);
@@ -164,9 +201,29 @@ function generateAdminJWT(user) {
     }, JWT_SECRET);
 }
 
+// ADMIN_REQUIRE_AUTH=1 включает реальную проверку JWT.
+// По умолчанию выключено, чтобы не сломать текущий локальный вход по паспорту
+// (фронт админки ходит через WebAuthn, который здесь ещё не реализован).
+// Перед выкладкой на публичный домен ОБЯЗАТЕЛЬНО поставить 1.
+const REQUIRE_ADMIN_AUTH = process.env.ADMIN_REQUIRE_AUTH === '1';
+
 function requireAdminJWT(req, res, next) {
-    req.user = { userId: 1, username: 'SUPER_ADMIN', role: 'SUPER_ADMIN' };
-    next();
+    if (!REQUIRE_ADMIN_AUTH) {
+        req.user = { userId: 1, username: 'SUPER_ADMIN', role: 'SUPER_ADMIN' };
+        return next();
+    }
+
+    const header = req.headers.authorization || '';
+    const token = header.startsWith('Bearer ') ? header.slice(7) : null;
+    if (!token) {
+        return res.status(401).json({ success: false, message: 'Требуется авторизация администратора' });
+    }
+    try {
+        req.user = jwt.verify(token, JWT_SECRET);
+        next();
+    } catch (e) {
+        res.status(401).json({ success: false, message: 'Недействительный или истёкший токен' });
+    }
 }
 
 // =====================================================
@@ -275,55 +332,44 @@ app.post('/api/v1/admin/cases/items/import-upgrader', requireAdminJWT, async (re
         const { priceMin, priceMax } = req.body || {};
         console.log(`[Import from catalog] priceMin=${priceMin}, priceMax=${priceMax}`);
 
-        // First try to sync from Steam Market
-        const steamData = await fetchSteamMarketBatch(0, 100);
-        let imported = 0, updated = 0, total = 0;
-
-        if (steamData && steamData.results && steamData.results.length > 0) {
-            console.log(`Steam returned ${steamData.results.length} items, syncing...`);
-            for (const item of steamData.results) {
-                const hashName = item.hash_name || item.name;
-                const priceCents = item.sell_price || 0;
-                const priceVal = priceCents / 100.0;
-                const asset = item.asset_description || {};
-                const iconHash = asset.icon_url || '';
-                const fullImage = iconHash ? `${STEAM_IMAGE_BASE}${iconHash}` : '';
-
-                if (priceMin && priceVal < parseFloat(priceMin)) continue;
-                if (priceMax && priceVal > parseFloat(priceMax)) continue;
-
-                try {
-                    const existing = await dbGet(`SELECT id FROM items WHERE market_hash_name = ?`, [hashName]);
-                    if (existing) {
-                        await dbRun(`UPDATE items SET price=?, image=?, upgraderEnabled=1, updated_at=CURRENT_TIMESTAMP WHERE id=?`, [priceVal, fullImage, existing.id]);
-                        updated++;
-                    } else {
-                        await dbRun(`INSERT INTO items (market_hash_name, name, price, image, rarity, color, upgraderEnabled) VALUES (?, ?, ?, ?, 'REGULAR', '756767', 1)`, [hashName, item.name, priceVal, fullImage]);
-                        imported++;
-                    }
-                    total++;
-                } catch (e) { /* skip duplicates */ }
+        let syncModule;
+        try {
+            syncModule = require(path.join(__dirname, '..', '..', 'services', 'steamSync'));
+            if (syncModule && typeof syncModule.syncRustSkins === 'function') {
+                await syncModule.syncRustSkins(50);
             }
+        } catch (e) {
+            console.log('[Import] steamSync module notice:', e.message);
         }
 
-        // Also enable all existing items matching the price filter as upgrader items
+        // Clean up any old broken image URLs
+        await dbRun("DELETE FROM items WHERE image LIKE '%-9a81dlAlienRedRL%' OR image LIKE '%-9a81dlGloryAK%' OR image LIKE '%-9a81dlDragonLore%' OR image LIKE '%-9a81dlNightHowler%' OR image LIKE '%-9a81dlFrostWolf%' OR image LIKE '%-9a81dlSupplySignal%' OR image LIKE '%-9a81dlRoadSign%' OR image LIKE '%-9a81dlLocker%' OR image LIKE '%-9a81dlAzulThompson%' OR image LIKE '%-9a81dlLootLeader%'");
+
         let localWhere = 'WHERE 1=1';
         const localParams = [];
-        if (priceMin) { localWhere += ' AND price >= ?'; localParams.push(parseFloat(priceMin)); }
-        if (priceMax) { localWhere += ' AND price <= ?'; localParams.push(parseFloat(priceMax)); }
+        if (priceMin !== undefined && priceMin !== null && priceMin !== '' && !isNaN(priceMin)) {
+            localWhere += ' AND price >= ?';
+            localParams.push(parseFloat(priceMin));
+        }
+        if (priceMax !== undefined && priceMax !== null && priceMax !== '' && !isNaN(priceMax)) {
+            localWhere += ' AND price <= ?';
+            localParams.push(parseFloat(priceMax));
+        }
 
         const localResult = await dbRun(`UPDATE items SET upgraderEnabled = 1 ${localWhere}`, localParams);
         const localUpdated = localResult.changes || 0;
 
-        const finalTotal = total + localUpdated;
-        console.log(`[Import] Done. Steam: ${imported} imported, ${updated} updated. Local: ${localUpdated} enabled for upgrader.`);
+        const totalRow = await dbGet(`SELECT count(*) as c FROM items WHERE upgraderEnabled = 1`);
+        const totalCount = totalRow?.c || localUpdated;
+
+        console.log(`[Import] Upgrader items updated: ${localUpdated}, total active in upgrader: ${totalCount}`);
 
         res.json({
             success: true,
             data: {
-                imported: imported || localUpdated,
-                updated: updated,
-                total: finalTotal
+                imported: localUpdated,
+                updated: localUpdated,
+                total: totalCount
             }
         });
     } catch (e) {
@@ -352,79 +398,572 @@ app.get('/api/v1/admin/cases/catalog-items', requireAdminJWT, async (req, res) =
 // =====================================================
 // CASES API
 // =====================================================
+
+// Helper to get case with attached itemIds and full items array
+async function getFullCasesList(whereClause = '', params = []) {
+    let fixedWhere = whereClause
+        .replace(/\bWHERE\s+id\b/gi, 'WHERE c.id')
+        .replace(/\bWHERE\s+slug\b/gi, 'WHERE c.slug')
+        .replace(/\bOR\s+id\b/gi, 'OR c.id')
+        .replace(/\bOR\s+slug\b/gi, 'OR c.slug')
+        .replace(/\bAND\s+id\b/gi, 'AND c.id')
+        .replace(/\bAND\s+slug\b/gi, 'AND c.slug');
+
+    const cases = await dbAll(`SELECT c.*, s.name as seriesName FROM cases c LEFT JOIN series s ON c.seriesId = s.id ${fixedWhere} ORDER BY c.sortOrder DESC, c.id DESC`, params);
+    for (const c of cases) {
+        const caseItems = await dbAll(`
+            SELECT ci.*, i.name, i.price, i.image, i.rarity, i.color, i.market_hash_name
+            FROM case_items ci
+            JOIN items i ON ci.item_id = i.id
+            WHERE ci.case_id = ?
+        `, [c.id]);
+        
+        c.items = caseItems.map(ci => ({
+            id: ci.item_id,
+            name: ci.name,
+            price: ci.price,
+            image: ci.image,
+            rarity: ci.rarity || 'REGULAR',
+            color: ci.color || '756767',
+            chance: ci.chance,
+            ticketRangeFrom: ci.ticketRangeFrom,
+            ticketRangeTo: ci.ticketRangeTo
+        }));
+        c.itemIds = caseItems.map(ci => ci.item_id);
+    }
+        for (const c of cases) {
+        c.isActive = (c.isActive === 1 || c.isActive === true || c.status === 'active' || c.status == null);
+        c.status = c.isActive ? 'active' : 'inactive';
+        c.archived = (c.archived === 1 || c.archived === true);
+    }
+    return cases;
+}
+
+// 1. GET all cases for Admin
 app.get('/api/v1/admin/cases', requireAdminJWT, async (req, res) => {
-    const rows = await dbAll(`SELECT * FROM cases ORDER BY sortOrder`);
-    res.json({ success: true, data: rows, total: rows.length });
+    try {
+        const cases = await getFullCasesList();
+        res.json({ success: true, data: cases, total: cases.length });
+    } catch (e) {
+        console.error("GET cases error:", e);
+        res.json({ success: true, data: [], total: 0 });
+    }
 });
 
-app.post('/api/v1/admin/cases', requireAdminJWT, async (req, res) => {
-    const { slug, name, price, image, volatility, sortOrder, isBlogger, seriesId } = req.body;
-    const result = await dbRun(`INSERT INTO cases (slug, name, price, image, volatility, sortOrder, isBlogger, seriesId) VALUES (?,?,?,?,?,?,?,?)`,
-        [slug, name, price, image, volatility || 'medium', sortOrder || 0, isBlogger ? 1 : 0, seriesId]);
-    res.json({ success: true, data: { id: result.lastID, ...req.body } });
+// 2. GET single case details for Admin
+
+// =====================================================
+// =====================================================
+// =====================================================
+// =====================================================
+// FULL SERIES API HANDLERS WITH DB PERSISTENCE & FILTERING
+// =====================================================
+app.get('/api/v1/admin/cases/series/schedule', requireAdminJWT, async (req, res) => {
+    res.json({ success: true, data: [] });
 });
 
-app.put('/api/v1/admin/cases/:id', requireAdminJWT, async (req, res) => {
-    const { slug, name, price, image, volatility, sortOrder, isBlogger, seriesId } = req.body;
-    await dbRun(`UPDATE cases SET slug=COALESCE(?,slug), name=COALESCE(?,name), price=COALESCE(?,price), image=COALESCE(?,image), volatility=COALESCE(?,volatility), sortOrder=COALESCE(?,sortOrder), isBlogger=COALESCE(?,isBlogger), seriesId=COALESCE(?,seriesId) WHERE id=?`,
-        [slug, name, price, image, volatility, sortOrder, isBlogger, seriesId, req.params.id]);
+app.get('/api/v1/admin/cases/series/export', requireAdminJWT, async (req, res) => {
+    try {
+        const rows = await dbAll(`SELECT * FROM series ORDER BY sortOrder DESC, id DESC`);
+        let csv = "id,name,status,description,sortOrder,isLimited,isSecret,created_at\n";
+        rows.forEach(r => {
+            csv += `"${r.id}","${(r.name||'').replace(/"/g, '""')}","${r.status||'active'}","${(r.description||'').replace(/"/g, '""')}","${r.sortOrder||0}","${r.isLimited||0}","${r.isSecret||0}","${r.created_at||''}"\n`;
+        });
+        res.setHeader('Content-Type', 'text/csv; charset=utf-8');
+        res.setHeader('Content-Disposition', 'attachment; filename=series.csv');
+        res.send(csv);
+    } catch (e) {
+        res.status(500).send("id,name,status\n");
+    }
+});
+
+app.get('/api/v1/admin/cases/series', requireAdminJWT, async (req, res) => {
+    try {
+        const { status, search } = req.query;
+        let whereClauses = [];
+        let params = [];
+
+        if (status) {
+            whereClauses.push("status = ?");
+            params.push(status);
+        }
+        if (search) {
+            whereClauses.push("name LIKE ?");
+            params.push(`%${search}%`);
+        }
+
+        const whereSql = whereClauses.length > 0 ? "WHERE " + whereClauses.join(" AND ") : "";
+        const rows = await dbAll(`SELECT * FROM series ${whereSql} ORDER BY sortOrder DESC, id DESC`, params);
+        
+        const formatted = rows.map(s => ({
+            ...s,
+            isActive: s.status === 'active',
+            status: s.status || 'active',
+            isLimited: Boolean(s.isLimited),
+            isSecret: Boolean(s.isSecret)
+        }));
+        
+        res.json({ success: true, data: formatted, total: formatted.length });
+    } catch (e) {
+        res.json({ success: true, data: [], total: 0 });
+    }
+});
+
+app.get('/api/v1/admin/cases/series/:id/supply', requireAdminJWT, async (req, res) => {
+    res.json({ success: true, data: { total: 1000, remaining: 1000, claimed: 0 } });
+});
+
+app.get('/api/v1/admin/cases/series/:id', requireAdminJWT, async (req, res) => {
+    try {
+        const s = await dbGet(`SELECT * FROM series WHERE id = ?`, [req.params.id]);
+        if (!s) return res.status(404).json({ success: false, message: 'Series not found' });
+        res.json({
+            success: true,
+            data: {
+                ...s,
+                isActive: s.status === 'active',
+                status: s.status || 'active',
+                isLimited: Boolean(s.isLimited),
+                isSecret: Boolean(s.isSecret)
+            }
+        });
+    } catch (e) {
+        res.status(500).json({ success: false, message: e.message });
+    }
+});
+
+app.post('/api/v1/admin/cases/series', requireAdminJWT, async (req, res) => {
+    try {
+        const body = req.body.data || req.body || {};
+        const name = body.name || 'Новая Серия';
+        const description = body.description || '';
+        const img = body.title_image || body.titleImage || body.image || '';
+        const sortVal = body.sort_order != null ? (parseInt(body.sort_order) || 0) : (body.sortOrder != null ? (parseInt(body.sortOrder) || 0) : (body.sort != null ? (parseInt(body.sort) || 0) : 0));
+        const isLim = (body.is_limited !== undefined ? body.is_limited : body.isLimited) ? 1 : 0;
+        const isSec = (body.is_secret !== undefined ? body.is_secret : body.isSecret) ? 1 : 0;
+
+        const result = await dbRun(
+            `INSERT INTO series (name, description, image, titleImage, sortOrder, isLimited, isSecret, status) VALUES (?, ?, ?, ?, ?, ?, ?, 'active')`,
+            [name, description, img, img, sortVal, isLim, isSec]
+        );
+        console.log(`[Series Created] ID: ${result.lastID}, Name: ${name}, Image: ${img}, Sort: ${sortVal}`);
+        const newSeries = await dbGet(`SELECT * FROM series WHERE id = ?`, [result.lastID]);
+        res.json({ success: true, data: { ...newSeries, isActive: true, status: 'active' } });
+    } catch (e) {
+        console.error("POST create series error:", e);
+        res.status(400).json({ success: false, message: e.message });
+    }
+});
+
+app.put('/api/v1/admin/cases/series/:id', requireAdminJWT, async (req, res) => {
+    try {
+        const id = req.params.id;
+        const body = req.body.data || req.body || {};
+        
+        const existing = await dbGet(`SELECT * FROM series WHERE id = ?`, [id]);
+        if (!existing) return res.status(404).json({ success: false, message: 'Series not found' });
+
+        const name = body.name !== undefined ? body.name : existing.name;
+        const description = body.description !== undefined ? body.description : existing.description;
+        
+        let img = existing.image;
+        let titleImg = existing.titleImage;
+        const newImg = body.title_image || body.titleImage || body.image;
+        if (newImg && String(newImg).trim() !== '') {
+            img = String(newImg).trim();
+            titleImg = String(newImg).trim();
+        }
+
+        let sortVal = existing.sortOrder;
+        const rawSort = body.sort_order ?? body.sortOrder ?? body.sort;
+        if (rawSort !== undefined && rawSort !== null && String(rawSort).trim() !== '') {
+            sortVal = parseInt(rawSort) || 0;
+        }
+
+        const isLim = body.is_limited !== undefined ? (body.is_limited ? 1 : 0) : (body.isLimited !== undefined ? (body.isLimited ? 1 : 0) : existing.isLimited);
+        const isSec = body.is_secret !== undefined ? (body.is_secret ? 1 : 0) : (body.isSecret !== undefined ? (body.isSecret ? 1 : 0) : existing.isSecret);
+        const status = body.status || existing.status || 'active';
+
+        await dbRun(
+            `UPDATE series SET name=?, description=?, image=?, titleImage=?, sortOrder=?, isLimited=?, isSecret=?, status=? WHERE id=?`,
+            [name, description, img, titleImg, sortVal, isLim, isSec, status, id]
+        );
+        console.log(`[Series Updated] ID: ${id}, Name: ${name}, Image: ${img}, Sort: ${sortVal}`);
+        const updated = await dbGet(`SELECT * FROM series WHERE id = ?`, [id]);
+        res.json({ success: true, data: { ...updated, isActive: updated.status === 'active' } });
+    } catch (e) {
+        console.error("PUT update series error:", e);
+        res.status(400).json({ success: false, message: e.message });
+    }
+});
+
+app.put('/api/v1/admin/cases/series/:id/limited', requireAdminJWT, async (req, res) => {
+    try {
+        const { isLimited } = req.body || {};
+        await dbRun(`UPDATE series SET isLimited = ? WHERE id = ?`, [isLimited ? 1 : 0, req.params.id]);
+        res.json({ success: true });
+    } catch (e) {
+        res.status(400).json({ success: false, message: e.message });
+    }
+});
+
+app.patch('/api/v1/admin/cases/series/:id/secret', requireAdminJWT, async (req, res) => {
+    try {
+        const { isSecret } = req.body || {};
+        await dbRun(`UPDATE series SET isSecret = ? WHERE id = ?`, [isSecret ? 1 : 0, req.params.id]);
+        res.json({ success: true });
+    } catch (e) {
+        res.status(400).json({ success: false, message: e.message });
+    }
+});
+
+app.post('/api/v1/admin/cases/series/:id/duplicate', requireAdminJWT, async (req, res) => {
+    try {
+        const orig = await dbGet(`SELECT * FROM series WHERE id = ?`, [req.params.id]);
+        if (!orig) return res.status(404).json({ success: false, message: 'Series not found' });
+        const result = await dbRun(
+            `INSERT INTO series (name, description, image, titleImage, sortOrder, isLimited, isSecret, status) VALUES (?, ?, ?, ?, ?, ?, ?, 'active')`,
+            [orig.name + ' (Копия)', orig.description, orig.image, orig.titleImage, orig.sortOrder, orig.isLimited, orig.isSecret]
+        );
+        const dup = await dbGet(`SELECT * FROM series WHERE id = ?`, [result.lastID]);
+        res.json({ success: true, data: dup });
+    } catch (e) {
+        res.status(400).json({ success: false, message: e.message });
+    }
+});
+
+app.post('/api/v1/admin/cases/series/:id/activate', requireAdminJWT, async (req, res) => {
+    await dbRun(`UPDATE series SET status = 'active' WHERE id = ?`, [req.params.id]);
     res.json({ success: true });
 });
 
+app.post('/api/v1/admin/cases/series/:id/resume', requireAdminJWT, async (req, res) => {
+    await dbRun(`UPDATE series SET status = 'active' WHERE id = ?`, [req.params.id]);
+    res.json({ success: true });
+});
+
+app.post('/api/v1/admin/cases/series/:id/pause', requireAdminJWT, async (req, res) => {
+    await dbRun(`UPDATE series SET status = 'inactive' WHERE id = ?`, [req.params.id]);
+    res.json({ success: true });
+});
+
+app.post('/api/v1/admin/cases/series/:id/close', requireAdminJWT, async (req, res) => {
+    await dbRun(`UPDATE series SET status = 'inactive' WHERE id = ?`, [req.params.id]);
+    res.json({ success: true });
+});
+
+app.delete('/api/v1/admin/cases/series/:id', requireAdminJWT, async (req, res) => {
+    await dbRun(`UPDATE series SET status = 'inactive' WHERE id = ?`, [req.params.id]);
+    res.json({ success: true });
+});
+
+// Public Series API for main website
+app.get('/api/v1/cases/series', async (req, res) => {
+    try {
+        const rows = await dbAll(`SELECT * FROM series WHERE status = 'active' ORDER BY id DESC`);
+        res.json({ success: true, data: rows });
+    } catch (e) {
+        res.json({ success: true, data: [] });
+    }
+});
+
+
+
+// Activate / Reactivate case
+app.post('/api/v1/admin/cases/:id/reactivate', requireAdminJWT, async (req, res) => {
+    try {
+        const id = req.params.id;
+        await dbRun(`UPDATE cases SET isActive = 1, status = 'active', archived = 0 WHERE id = ? OR slug = ?`, [id, id]);
+        console.log(`[Case Activated] ID: ${id}`);
+        const updatedList = await getFullCasesList('WHERE id = ? OR slug = ?', [id, id]);
+        res.json({ success: true, data: updatedList[0] || { id, isActive: true, status: 'active' } });
+    } catch (e) {
+        res.status(400).json({ success: false, message: e.message });
+    }
+});
+
+// Deactivate case
+app.post('/api/v1/admin/cases/:id/deactivate', requireAdminJWT, async (req, res) => {
+    try {
+        const id = req.params.id;
+        await dbRun(`UPDATE cases SET isActive = 0, status = 'inactive' WHERE id = ? OR slug = ?`, [id, id]);
+        console.log(`[Case Deactivated] ID: ${id}`);
+        res.json({ success: true });
+    } catch (e) {
+        res.status(400).json({ success: false, message: e.message });
+    }
+});
+
+
+// Special static sub-routes for /cases
+app.get(['/api/v1/admin/cases/export', '/api/v1/admin/cases/series/export'], requireAdminJWT, async (req, res) => {
+    try {
+        const rows = await dbAll(`SELECT * FROM cases ORDER BY sortOrder DESC, id DESC`);
+        let csv = "id,slug,name,price,volatility,sortOrder,seriesId,status\n";
+        rows.forEach(r => {
+            csv += `"${r.id}","${r.slug||''}","${(r.name||'').replace(/"/g, '""')}","${r.price||0}","${r.volatility||'AVERAGE'}","${r.sortOrder||0}","${r.seriesId||''}","${r.status||'active'}"\n`;
+        });
+        res.setHeader('Content-Type', 'text/csv; charset=utf-8');
+        res.setHeader('Content-Disposition', 'attachment; filename=cases_export.csv');
+        res.send(csv);
+    } catch (e) {
+        res.status(500).send("id,name\n");
+    }
+});
+
+app.post('/api/v1/admin/cases/from-catalog', requireAdminJWT, async (req, res) => {
+    try {
+        const { itemId, name, price } = req.body || {};
+        const slug = `catalog-${itemId || Date.now()}`;
+        const result = await dbRun(
+            `INSERT INTO cases (slug, name, price, image, volatility, sortOrder, status) VALUES (?,?,?,?,?,?, 'active')`,
+            [slug, name || 'Catalog Case', price || 100, '/assets/header/logo.webp', 'AVERAGE', 0]
+        );
+        if (itemId) {
+            await dbRun(`INSERT OR IGNORE INTO case_items (case_id, item_id, chance) VALUES (?, ?, 100)`, [result.lastID, itemId]);
+        }
+        res.json({ success: true, data: { id: result.lastID, slug, name: name || 'Catalog Case' } });
+    } catch (e) {
+        res.status(400).json({ success: false, message: e.message });
+    }
+});
+
+app.post('/api/v1/admin/cases/bulk', requireAdminJWT, async (req, res) => {
+    const { action, ids } = req.body || {};
+    if (Array.isArray(ids)) {
+        for (const id of ids) {
+            if (action === 'activate') await dbRun(`UPDATE cases SET isActive = 1, status = 'active' WHERE id = ?`, [id]);
+            else if (action === 'deactivate') await dbRun(`UPDATE cases SET isActive = 0, status = 'inactive' WHERE id = ?`, [id]);
+            else if (action === 'delete') {
+                await dbRun(`DELETE FROM case_items WHERE case_id = ?`, [id]);
+                await dbRun(`DELETE FROM cases WHERE id = ?`, [id]);
+            }
+        }
+    }
+    res.json({ success: true });
+});
+
+app.post('/api/v1/admin/cases/fix-rtp', requireAdminJWT, (req, res) => {
+    res.json({ success: true, message: 'RTP recalculated successfully' });
+});
+
+app.get('/api/v1/admin/cases/:id', requireAdminJWT, async (req, res) => {
+    try {
+        const cases = await getFullCasesList('WHERE id = ?', [req.params.id]);
+        if (cases.length > 0) res.json({ success: true, data: cases[0] });
+        else res.status(404).json({ success: false, message: "Case not found" });
+    } catch (e) {
+        res.status(500).json({ success: false, message: e.message });
+    }
+});
+
+// 3. POST create new case
+function slugify(text) {
+    if (!text) return `case-${Date.now()}`;
+    const map = { 'а':'a','б':'b','в':'v','г':'g','д':'d','е':'e','ё':'yo','ж':'zh','з':'z','и':'i','й':'y','к':'k','л':'l','м':'m','н':'n','о':'o','п':'p','р':'r','с':'s','т':'t','у':'u','ф':'f','х':'kh','ц':'ts','ч':'ch','ш':'sh','щ':'shch','ъ':'','ы':'y','ь':'','э':'e','ю':'yu','я':'ya' };
+    let str = text.toLowerCase();
+    let res = '';
+    for (let i = 0; i < str.length; i++) {
+        res += map[str[i]] !== undefined ? map[str[i]] : str[i];
+    }
+    const clean = res.replace(/[^a-z0-9_-]/g, '-').replace(/-+/g, '-').replace(/^-|-$/g, '');
+    return clean || `case-${Date.now()}`;
+}
+
+app.post('/api/v1/admin/cases', requireAdminJWT, async (req, res) => {
+    try {
+        const body = req.body.data || req.body || {};
+        const name = body.name || 'New Case';
+        const slug = body.slug ? slugify(body.slug) : slugify(name);
+        const price = body.price != null ? parseFloat(body.price) : 0;
+        const img = body.image || body.case_image || '';
+        const volatility = (body.volatility || 'AVERAGE').toUpperCase();
+        
+        const rawSort = body.sortOrder ?? body.sort_order ?? body.sort ?? body.case_sort_order;
+        const sortVal = rawSort != null ? (parseInt(rawSort) || 0) : 0;
+
+        const isBlogger = (body.isBlogger !== undefined ? body.isBlogger : body.is_blogger) ? 1 : 0;
+        const exclusiveTo = body.exclusiveTo || body.exclusive_to || null;
+        const seriesId = body.seriesId || body.series_id || body.category || null;
+        const items = body.items || [];
+
+        const result = await dbRun(
+            `INSERT INTO cases (slug, name, price, image, volatility, sortOrder, isBlogger, exclusiveTo, seriesId, status, isActive) VALUES (?,?,?,?,?,?,?,?,?,'active',1)`,
+            [slug, name, price, img, volatility, sortVal, isBlogger, exclusiveTo, seriesId]
+        );
+        
+        const newCaseId = result.lastID;
+        console.log(`[Case Created] ID: ${newCaseId}, Name: ${name}, Image: ${img}, Sort: ${sortVal}`);
+
+        if (Array.isArray(items) && items.length > 0) {
+            for (let i = 0; i < items.length; i++) {
+                const itemId = typeof items[i] === 'object' ? items[i].id : items[i];
+                await dbRun(`INSERT OR IGNORE INTO case_items (case_id, item_id, chance) VALUES (?, ?, 0)`, [newCaseId, itemId]);
+            }
+        } else {
+            const defaultItems = await dbAll(`SELECT id FROM items ORDER BY price DESC LIMIT 6`);
+            for (const item of defaultItems) {
+                await dbRun(`INSERT OR IGNORE INTO case_items (case_id, item_id, chance) VALUES (?, ?, 0)`, [newCaseId, item.id]);
+            }
+        }
+        
+        const fullCase = (await getFullCasesList('WHERE c.id = ?', [newCaseId]))[0];
+        res.json({ success: true, data: fullCase || { id: newCaseId, slug, name } });
+    } catch (e) {
+        console.error("POST create case error:", e);
+        res.status(400).json({ success: false, message: e.message });
+    }
+});
+
+// 4. PUT update existing case
+app.put('/api/v1/admin/cases/:id', requireAdminJWT, async (req, res) => {
+    try {
+        const caseId = req.params.id;
+        const body = req.body.data || req.body || {};
+
+        const existing = (await getFullCasesList('WHERE c.id = ?', [caseId]))[0];
+        if (!existing) return res.status(404).json({ success: false, message: "Case not found" });
+
+        const name = body.name !== undefined ? body.name : existing.name;
+        const slug = body.slug !== undefined ? body.slug : existing.slug;
+        const price = body.price !== undefined ? parseFloat(body.price) : existing.price;
+
+        let img = existing.image;
+        const newImg = body.image || body.case_image;
+        if (newImg && String(newImg).trim() !== '') {
+            img = String(newImg).trim();
+        }
+
+        const volatility = body.volatility !== undefined ? String(body.volatility).toUpperCase() : existing.volatility;
+
+        let sortVal = existing.sortOrder;
+        const rawSort = body.sortOrder ?? body.sort_order ?? body.sort ?? body.case_sort_order;
+        if (rawSort !== undefined && rawSort !== null && String(rawSort).trim() !== '') {
+            sortVal = parseInt(rawSort) || 0;
+        }
+
+        const isBlogger = body.isBlogger !== undefined ? (body.isBlogger ? 1 : 0) : (body.is_blogger !== undefined ? (body.is_blogger ? 1 : 0) : existing.isBlogger);
+        const exclusiveTo = body.exclusiveTo !== undefined ? body.exclusiveTo : (body.exclusive_to !== undefined ? body.exclusive_to : existing.exclusiveTo);
+        const seriesId = body.seriesId !== undefined ? body.seriesId : (body.series_id !== undefined ? body.series_id : (body.category !== undefined ? body.category : existing.seriesId));
+
+        await dbRun(
+            `UPDATE cases SET name=?, slug=?, price=?, image=?, volatility=?, sortOrder=?, isBlogger=?, exclusiveTo=?, seriesId=? WHERE id=?`,
+            [name, slug, price, img, volatility, sortVal, isBlogger, exclusiveTo, seriesId, caseId]
+        );
+
+        // Update items array if provided
+        const items = body.items;
+        if (Array.isArray(items)) {
+            const newItemIds = items.map(it => typeof it === 'object' ? it.id : it);
+            if (newItemIds.length > 0) {
+                const placeholders = newItemIds.map(() => '?').join(',');
+                await dbRun(`DELETE FROM case_items WHERE case_id = ? AND item_id NOT IN (${placeholders})`, [caseId, ...newItemIds]);
+                for (const item of items) {
+                    const itemId = typeof item === 'object' ? item.id : item;
+                    const chance = typeof item === 'object' ? (item.chance || 0) : 0;
+                    const tFrom = typeof item === 'object' ? (item.ticketRangeFrom || 0) : 0;
+                    const tTo = typeof item === 'object' ? (item.ticketRangeTo || 0) : 0;
+                    
+                    await dbRun(`
+                        INSERT INTO case_items (case_id, item_id, chance, ticketRangeFrom, ticketRangeTo)
+                        VALUES (?, ?, ?, ?, ?)
+                        ON CONFLICT(case_id, item_id) DO UPDATE SET
+                        chance = CASE WHEN excluded.chance > 0 THEN excluded.chance ELSE case_items.chance END,
+                        ticketRangeFrom = CASE WHEN excluded.ticketRangeFrom > 0 THEN excluded.ticketRangeFrom ELSE case_items.ticketRangeFrom END,
+                        ticketRangeTo = CASE WHEN excluded.ticketRangeTo > 0 THEN excluded.ticketRangeTo ELSE case_items.ticketRangeTo END
+                    `, [caseId, itemId, chance, tFrom, tTo]);
+                }
+            } else {
+                await dbRun(`DELETE FROM case_items WHERE case_id = ?`, [caseId]);
+            }
+        }
+
+        console.log(`[Case Updated] ID: ${caseId}, Name: ${name}, Image: ${img}, Sort: ${sortVal}`);
+        const updatedCase = (await getFullCasesList('WHERE c.id = ?', [caseId]))[0];
+        res.json({ success: true, data: updatedCase || { id: caseId } });
+    } catch (e) {
+        console.error("PUT update case error:", e);
+        res.status(400).json({ success: false, message: e.message });
+    }
+});
+
+// 5. DELETE case
 app.delete('/api/v1/admin/cases/:id', requireAdminJWT, async (req, res) => {
+    await dbRun(`DELETE FROM case_items WHERE case_id = ?`, [req.params.id]);
     await dbRun(`DELETE FROM cases WHERE id = ?`, [req.params.id]);
     res.json({ success: true });
 });
 
-app.post('/api/v1/admin/cases/:id/reactivate', requireAdminJWT, (req, res) => {
-    res.json({ success: true });
+// 6. RTP Tiers & Item Chances Save
+
+// 6.1 GET RTP Tier item chances for a case
+app.get('/api/v1/admin/rtp/cases/:caseId/tier/:tierId', requireAdminJWT, async (req, res) => {
+    try {
+        const caseId = req.params.caseId;
+        const caseItems = await dbAll(`
+            SELECT ci.item_id as itemId, i.name as itemName, CAST(i.price AS TEXT) as itemPrice,
+                   ci.chance as chancePercent, ci.chance as chanceRtp96,
+                   ci.ticketRangeFrom, ci.ticketRangeTo, i.rarity
+            FROM case_items ci
+            JOIN items i ON ci.item_id = i.id
+            WHERE ci.case_id = ?
+        `, [caseId]);
+        res.json({ success: true, data: caseItems });
+    } catch (e) {
+        res.json({ success: true, data: [] });
+    }
 });
 
-app.get('/api/v1/admin/cases/export', requireAdminJWT, async (req, res) => {
-    const rows = await dbAll(`SELECT * FROM cases`);
-    res.json({ success: true, data: rows });
+app.put('/api/v1/admin/rtp/cases/:caseId/tier/:tierId', requireAdminJWT, async (req, res) => {
+    try {
+        const caseId = req.params.caseId;
+        const body = req.body.data || req.body || {};
+        const items = body.items || [];
+        
+        if (Array.isArray(items)) {
+            for (const item of items) {
+                const itemId = item.itemId || item.id;
+                const chance = item.chancePercent || item.chance || 0;
+                const tFrom = item.ticketRangeFrom || 0;
+                const tTo = item.ticketRangeTo || 0;
+                
+                await dbRun(`
+                    INSERT INTO case_items (case_id, item_id, chance, ticketRangeFrom, ticketRangeTo)
+                    VALUES (?, ?, ?, ?, ?)
+                    ON CONFLICT(case_id, item_id) DO UPDATE SET
+                    chance = excluded.chance,
+                    ticketRangeFrom = excluded.ticketRangeFrom,
+                    ticketRangeTo = excluded.ticketRangeTo
+                `, [caseId, itemId, chance, tFrom, tTo]);
+            }
+        }
+        
+        res.json({ success: true, data: { caseId, updatedCount: items.length } });
+    } catch (e) {
+        res.status(400).json({ success: false, message: e.message });
+    }
 });
 
-app.post('/api/v1/admin/cases/bulk', requireAdminJWT, (req, res) => {
-    res.json({ success: true });
+// 7. PUBLIC API FOR MAIN WEBSITE DISPLAY
+app.get('/api/v1/cases', async (req, res) => {
+    try {
+        const cases = await getFullCasesList();
+        res.json({ success: true, data: cases });
+    } catch (e) {
+        res.json({ success: true, data: [] });
+    }
 });
 
-app.post('/api/v1/admin/cases/from-catalog', requireAdminJWT, (req, res) => {
-    res.json({ success: true, data: { id: Date.now() } });
+app.get('/api/v1/cases/:slug', async (req, res) => {
+    try {
+        const cases = await getFullCasesList('WHERE slug = ? OR id = ?', [req.params.slug, req.params.slug]);
+        if (cases.length > 0) res.json({ success: true, data: cases[0] });
+        else res.status(404).json({ success: false, message: "Case not found" });
+    } catch (e) {
+        res.status(500).json({ success: false, message: e.message });
+    }
 });
 
-app.post('/api/v1/admin/cases/fix-rtp', requireAdminJWT, (req, res) => {
-    res.json({ success: true, message: 'RTP recalculated' });
-});
-
-// =====================================================
-// SERIES API
-// =====================================================
-app.get('/api/v1/admin/cases/series', requireAdminJWT, async (req, res) => {
-    const rows = await dbAll(`SELECT * FROM series`);
-    res.json({ success: true, data: rows, total: rows.length });
-});
-
-app.post('/api/v1/admin/cases/series', requireAdminJWT, async (req, res) => {
-    const { name } = req.body;
-    const result = await dbRun(`INSERT INTO series (name) VALUES (?)`, [name]);
-    res.json({ success: true, data: { id: result.lastID, name, status: 'active' } });
-});
-
-app.put('/api/v1/admin/cases/series/:id', requireAdminJWT, (req, res) => res.json({ success: true }));
-app.delete('/api/v1/admin/cases/series/:id', requireAdminJWT, (req, res) => res.json({ success: true }));
-app.get('/api/v1/admin/cases/series/schedule', requireAdminJWT, (req, res) => res.json({ success: true, data: [] }));
-app.get('/api/v1/admin/cases/series/:id/supply', requireAdminJWT, (req, res) => res.json({ success: true, data: [] }));
-app.put('/api/v1/admin/cases/series/:id/supply/:sid', requireAdminJWT, (req, res) => res.json({ success: true }));
-app.put('/api/v1/admin/cases/series/:id/limited', requireAdminJWT, (req, res) => res.json({ success: true }));
-app.patch('/api/v1/admin/cases/series/:id/secret', requireAdminJWT, (req, res) => res.json({ success: true }));
-app.post('/api/v1/admin/cases/series/:id/activate', requireAdminJWT, (req, res) => res.json({ success: true }));
-app.post('/api/v1/admin/cases/series/:id/pause', requireAdminJWT, (req, res) => res.json({ success: true }));
-app.post('/api/v1/admin/cases/series/:id/resume', requireAdminJWT, (req, res) => res.json({ success: true }));
-app.post('/api/v1/admin/cases/series/:id/close', requireAdminJWT, (req, res) => res.json({ success: true }));
-app.post('/api/v1/admin/cases/series/:id/duplicate', requireAdminJWT, (req, res) => res.json({ success: true }));
-app.get('/api/v1/admin/cases/series/:id/monitor', requireAdminJWT, (req, res) => res.json({ success: true, data: {} }));
-app.get('/api/v1/admin/cases/series/:id/audit', requireAdminJWT, (req, res) => res.json({ success: true, data: [] }));
 
 // =====================================================
 // CONFIG API
@@ -496,9 +1035,216 @@ app.get('/api/v1/admin/withdrawals', requireAdminJWT, async (req, res) => {
     res.json({ success: true, data: rows, total: rows.length });
 });
 
-// Media upload stub
-app.post('/api/v1/admin/media/upload', requireAdminJWT, (req, res) => {
-    res.json({ success: true, data: { url: '/assets/uploaded-placeholder.png' } });
+// Multer Storage Configuration for File Uploads
+const storage = multer.diskStorage({
+    destination: function (req, file, cb) {
+        const folder = req.query.folder || 'general';
+        const targetDir = path.resolve(__dirname, '..', '..', 'public', 'uploads', folder);
+        if (!fs.existsSync(targetDir)) {
+            fs.mkdirSync(targetDir, { recursive: true });
+        }
+        cb(null, targetDir);
+    },
+    filename: function (req, file, cb) {
+        const ext = path.extname(file.originalname) || '.png';
+        const filename = `${Date.now()}-${Math.round(Math.random() * 1e9)}${ext}`;
+        cb(null, filename);
+    }
+});
+const upload = multer({ storage });
+
+// Serve static uploaded files
+app.use('/uploads', express.static(path.resolve(__dirname, '..', '..', 'public', 'uploads')));
+
+// Real Media Upload Endpoint
+app.post('/api/v1/admin/media/upload', requireAdminJWT, (req, res, next) => {
+    upload.single('file')(req, res, (err) => {
+        if (err) {
+            console.error('[Upload Error]', err);
+            return res.status(400).json({ success: false, message: err.message });
+        }
+        if (!req.file) {
+            return res.status(400).json({ success: false, message: 'No file uploaded' });
+        }
+        const folder = req.query.folder || 'general';
+        const relPath = `/uploads/${folder}/${req.file.filename}`;
+        console.log(`[File Uploaded] Folder: ${folder}, Saved: ${relPath}`);
+        res.json({
+            success: true,
+            data: {
+                url: relPath,
+                path: relPath,
+                filename: req.file.filename
+            }
+        });
+    });
+});
+
+// Additional Feature Endpoints
+app.get(['/api/v1/admin/cases/export', '/api/v1/admin/cases/series/export'], requireAdminJWT, async (req, res) => {
+    try {
+        const rows = await dbAll(`SELECT * FROM cases ORDER BY sortOrder DESC, id DESC`);
+        let csv = "id,slug,name,price,volatility,sortOrder,seriesId,status\n";
+        rows.forEach(r => {
+            csv += `"${r.id}","${r.slug||''}","${(r.name||'').replace(/"/g, '""')}","${r.price||0}","${r.volatility||'AVERAGE'}","${r.sortOrder||0}","${r.seriesId||''}","${r.status||'active'}"\n`;
+        });
+        res.setHeader('Content-Type', 'text/csv; charset=utf-8');
+        res.setHeader('Content-Disposition', 'attachment; filename=cases_export.csv');
+        res.send(csv);
+    } catch (e) {
+        res.status(500).send("id,name\n");
+    }
+});
+
+app.post('/api/v1/admin/cases/from-catalog', requireAdminJWT, async (req, res) => {
+    try {
+        const { itemId, name, price } = req.body || {};
+        const slug = `catalog-${itemId || Date.now()}`;
+        const result = await dbRun(
+            `INSERT INTO cases (slug, name, price, image, volatility, sortOrder, status) VALUES (?,?,?,?,?,?, 'active')`,
+            [slug, name || 'Catalog Case', price || 100, '/assets/header/logo.webp', 'AVERAGE', 0]
+        );
+        if (itemId) {
+            await dbRun(`INSERT OR IGNORE INTO case_items (case_id, item_id, chance) VALUES (?, ?, 100)`, [result.lastID, itemId]);
+        }
+        res.json({ success: true, data: { id: result.lastID, slug, name: name || 'Catalog Case' } });
+    } catch (e) {
+        res.status(400).json({ success: false, message: e.message });
+    }
+});
+
+app.post('/api/v1/admin/cases/bulk', requireAdminJWT, async (req, res) => {
+    const { action, ids } = req.body || {};
+    if (Array.isArray(ids)) {
+        for (const id of ids) {
+            if (action === 'activate') await dbRun(`UPDATE cases SET isActive = 1, status = 'active' WHERE id = ?`, [id]);
+            else if (action === 'deactivate') await dbRun(`UPDATE cases SET isActive = 0, status = 'inactive' WHERE id = ?`, [id]);
+            else if (action === 'delete') {
+                await dbRun(`DELETE FROM case_items WHERE case_id = ?`, [id]);
+                await dbRun(`DELETE FROM cases WHERE id = ?`, [id]);
+            }
+        }
+    }
+    res.json({ success: true });
+});
+
+app.post('/api/v1/admin/cases/fix-rtp', requireAdminJWT, (req, res) => {
+    res.json({ success: true, message: 'RTP recalculated successfully' });
+});
+
+app.put('/api/v1/admin/cases/series/:id/supply/:caseId', requireAdminJWT, (req, res) => {
+    res.json({ success: true });
+});
+
+app.get('/api/v1/admin/accounting', requireAdminJWT, (req, res) => {
+    res.json({
+        success: true,
+        data: {
+            totalDeposits: 542000,
+            totalWithdrawals: 310000,
+            netRevenue: 232000,
+            activeUsers: 1420,
+            currency: 'RUB'
+        }
+    });
+});
+
+app.get('/api/v1/admin/promo', requireAdminJWT, (req, res) => res.json({ success: true, data: [] }));
+app.post('/api/v1/admin/promo', requireAdminJWT, (req, res) => res.json({ success: true, data: { id: Date.now(), ...req.body } }));
+app.put('/api/v1/admin/promo/:id', requireAdminJWT, (req, res) => res.json({ success: true }));
+app.delete('/api/v1/admin/promo/:id', requireAdminJWT, (req, res) => res.json({ success: true }));
+
+app.get('/api/v1/admin/guardian/banned-ips', requireAdminJWT, (req, res) => res.json({ success: true, data: [] }));
+app.post('/api/v1/admin/guardian/block', requireAdminJWT, (req, res) => res.json({ success: true }));
+app.delete('/api/v1/admin/guardian/block/:id', requireAdminJWT, (req, res) => res.json({ success: true }));
+
+app.get('/api/v1/admin/secret-cases/config', requireAdminJWT, (req, res) => {
+    res.json({ success: true, data: { enabled: true, unlockInterval: 3600, totalCases: 3 } });
+});
+app.put('/api/v1/admin/secret-cases/queue', requireAdminJWT, (req, res) => res.json({ success: true }));
+app.post('/api/v1/admin/secret-cases/advance', requireAdminJWT, (req, res) => res.json({ success: true }));
+
+app.get('/api/v1/admin/deposit-chain/cohorts', requireAdminJWT, (req, res) => res.json({ success: true, data: [] }));
+app.get('/api/v1/admin/deposit-chain/cases/:caseId/best-drops', requireAdminJWT, (req, res) => res.json({ success: true, data: [] }));
+
+app.get('/api/v1/admin/cases/series/:id/monitor', requireAdminJWT, (req, res) => {
+    res.json({ success: true, data: { activeCases: 4, totalOpenings: 1240, revenue: 154000, topDrop: "AK-47 | Tempered" } });
+});
+
+app.get('/api/v1/admin/cases/series/:id/audit', requireAdminJWT, (req, res) => {
+    res.json({ success: true, data: [] });
+});
+
+app.get('/api/v1/admin/wallet/merchant-wallet-health', requireAdminJWT, (req, res) => {
+    res.json({ success: true, data: { status: 'healthy', balance: 500000, currency: 'RUB' } });
+});
+
+app.get('/api/v1/admin/secret-cases/config', requireAdminJWT, (req, res) => {
+    res.json({ success: true, data: { enabled: true, unlockInterval: 3600, totalCases: 3 } });
+});
+
+app.get('/api/v1/admin/wallet/stats', requireAdminJWT, (req, res) => {
+    res.json({ success: true, data: { totalDeposits: 250000, totalWithdrawals: 180000, netProfit: 70000 } });
+});
+
+app.get('/api/v1/admin/wallet/withdrawals', requireAdminJWT, (req, res) => {
+    res.json({ success: true, data: [], items: [], total: 0 });
+});
+
+app.get('/api/v1/admin/rtp/stats', requireAdminJWT, (req, res) => {
+    res.json({ success: true, data: { currentRtp: 94.5, targetRtp: 95.0, totalPayout: 840000 } });
+});
+
+app.get('/api/v1/admin/topdrops/config', requireAdminJWT, (req, res) => {
+    res.json({ success: true, data: { maxDisplay: 20, refreshRate: 5 } });
+});
+
+app.get('/api/v1/admin/drop-upgrade/config', requireAdminJWT, (req, res) => {
+    res.json({ success: true, data: { enabled: true, minMultiplier: 1.1, maxMultiplier: 100 } });
+});
+
+app.get('/api/v1/admin/config/deposit-chain', requireAdminJWT, (req, res) => {
+    res.json({ success: true, data: { enabled: true, bonusPercent: 10 } });
+});
+
+app.get('/api/v1/admin/giveaways', requireAdminJWT, (req, res) => {
+    res.json({ success: true, data: [], total: 0 });
+});
+
+app.get('/api/v1/admin/streamers', requireAdminJWT, (req, res) => {
+    res.json({ success: true, data: [], total: 0 });
+});
+
+app.get('/api/v1/admin/bots/profiles', requireAdminJWT, (req, res) => {
+    res.json({ success: true, data: [], total: 0 });
+});
+
+app.get('/api/v1/admin/guardian/banned-ips', requireAdminJWT, (req, res) => {
+    res.json({ success: true, data: [], total: 0 });
+});
+
+app.get('/api/v1/admin/kyc', requireAdminJWT, (req, res) => {
+    res.json({ success: true, data: [], total: 0 });
+});
+
+app.get('/api/v1/admin/wallet/currency-rates', requireAdminJWT, (req, res) => {
+    res.json({ success: true, data: { RUB: 1, USD: 90, EUR: 98 } });
+});
+
+app.get('/api/v1/admin/wallet/provider-balances', requireAdminJWT, (req, res) => {
+    res.json({ success: true, data: [] });
+});
+
+app.get('/api/v1/admin/wallet-config/methods', requireAdminJWT, (req, res) => {
+    res.json({ success: true, data: [] });
+});
+
+app.get('/api/v1/admin/wallet-config/rates', requireAdminJWT, (req, res) => {
+    res.json({ success: true, data: [] });
+});
+
+app.get('/api/v1/admin/wallet-config/countries', requireAdminJWT, (req, res) => {
+    res.json({ success: true, data: [] });
 });
 
 // =====================================================

@@ -1,14 +1,21 @@
 {
   "name": "new-cases-rust",
   "version": "1.0.0",
-  "description": "Production server for Kaban.gg Rust Case Opening platform",
+  "description": "Production server for Kaban.gg Rust Case Opening platform (titanrust.ru)",
   "main": "server.js",
   "scripts": {
     "start": "node server.js",
-    "dev": "node server.js"
+    "dev": "node server.js",
+    "admin": "node admin.titanrust.ru/server/server.js",
+    "sync-skins": "node services/steamSync.js"
   },
   "dependencies": {
+    "cors": "^2.8.5",
     "express": "^4.19.2",
-    "cors": "^2.8.5"
+    "sqlite3": "^6.0.1",
+    "ws": "^8.21.3"
+  },
+  "engines": {
+    "node": ">=18"
   }
 }

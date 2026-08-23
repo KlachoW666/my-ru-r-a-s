@@ -1,1 +1,1 @@
-const t=t=>{return t?t.startsWith("http")?t:`${r=`https://cdn.kaban.gg${t}`}${r.includes("?")?"&":"?"}v=1786121492559`:"";var r};export{t as r};
+const t=t=>{if(!t)return"";if(t.startsWith("http")||t.startsWith("data:")||t.startsWith("/uploads")||t.startsWith("/assets")||t.startsWith("/images"))return t;if(t.startsWith("/"))return t;return`${r=`https://cdn.kaban.gg${t}`}${r.includes("?")?"&":"?"}v=1786121492559`};export{t as r};

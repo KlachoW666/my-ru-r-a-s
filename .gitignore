@@ -1,0 +1,37 @@
+# Секреты
+.env
+.env.local
+.env.*.local
+
+# Зависимости (в репозитории их держать не нужно — ставятся npm install)
+node_modules/
+**/node_modules/
+
+# Логи и временные файлы
+*.log
+npm-debug.log*
+.DS_Store
+Thumbs.db
+*.tmp
+*.bak
+
+# Отладочные скриншоты
+*_before_click.png
+*_after_click.png
+screenshot*.png
+
+# Резервные копии базы
+*.sqlite-journal
+*.sqlite-wal
+*.sqlite-shm
+*.sqlite.bak
+
+# Кэш графа знаний (генерируется командой graphify)
+graphify-out/cache/
+graphify-out/.graphify_*
+
+# Рабочие деревья git, созданные агентом — это отдельные чекауты
+.claude/worktrees/
+
+# Граф знаний — генерируется командой: graphify update .
+graphify-out/

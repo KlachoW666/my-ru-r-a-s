@@ -1,17 +1,70 @@
+// Читаем .env из корня проекта (встроено в Node >= 20.12, никаких зависимостей).
+// Должно стоять до любых require, которые читают process.env.
+try { process.loadEnvFile(require('path').resolve(__dirname, '.env')); } catch { /* .env необязателен */ }
+
+function fixImageUrl(img) {
+  if (!img) return "/assets/battles/winner-boar.png";
+  if (img.startsWith('http://') || img.startsWith('https://') || img.startsWith('/')) {
+    if (img.includes('community.steamstatic.com')) {
+      return img.replace('community.steamstatic.com', 'community.cloudflare.steamstatic.com');
+    }
+    return img;
+  }
+  if (img.startsWith('-9a81dl')) {
+    return `https://community.cloudflare.steamstatic.com/economy/image/${img}`;
+  }
+  return img;
+}
 const express = require('express');
+const http = require('http');
+const { WebSocketServer } = require('ws');
 const cors = require('cors');
 const path = require('path');
 const fs = require('fs');
 
-const { syncRustSkins, getSteamPlayerSummary, SKINS_FILE } = require('./services/steamSync');
+const { SKINS_FILE, ADMIN_DB_PATH } = require('./services/steamSync');
+const { registerAuthRoutes, currentUser, guestUser, verifyJWT, ensureAuthSchema, PUBLIC_URL, ALLOW_MOCK_AUTH } = require('./services/auth');
+const {
+  startWorker: startCatalogWorker,
+  stopWorker: stopCatalogWorker,
+  getStatus: getCatalogStatus,
+  queryItems,
+  getRarityBreakdown,
+  ensureCatalogSchema,
+  openDb: openCatalogDb,
+  PAGE_SIZE: CATALOG_PAGE_SIZE,
+  REQUEST_INTERVAL_MS: CATALOG_INTERVAL_MS
+} = require('./services/steamCatalog');
+
+// --- Кэш ответов в памяти -------------------------------------------------
+// Сайт читает каталог из SQLite, а не из Steam, поэтому единственное, что тут
+// нужно, — не дёргать базу на каждый запрос. TTL 30 с: именно с такой частотой
+// пользователь и видит обновления.
+const _cache = new Map();
+async function cached(key, ttlMs, producer) {
+  const hit = _cache.get(key);
+  if (hit && Date.now() - hit.at < ttlMs) return hit.value;
+  const value = await producer();
+  _cache.set(key, { at: Date.now(), value });
+  if (_cache.size > 500) {                       // простая защита от разрастания
+    const oldest = [..._cache.entries()].sort((a, b) => a[1].at - b[1].at)[0];
+    if (oldest) _cache.delete(oldest[0]);
+  }
+  return value;
+}
 
 const app = express();
-const PORT = process.env.PORT || 3030;
+const PORT = process.env.PORT || 3101;
 
 // Path to public static directory
 const PUBLIC_DIR = path.resolve(__dirname, 'public');
 
-app.use(cors());
+// За nginx/Cloudflare: без этого req.protocol всегда 'http' и Secure-cookie не ставится.
+app.set('trust proxy', 1);
+
+// origin:true отражает Origin запроса вместо '*' — обязательно, потому что
+// фронт ходит с withCredentials:true, а с '*' браузер такие ответы отбрасывает.
+app.use(cors({ origin: true, credentials: true }));
 app.use(express.json());
 
 // Request logging middleware for API calls
@@ -22,30 +75,243 @@ app.use((req, res, next) => {
   next();
 });
 
-// Helper to load synced Steam skins
-function getSyncedSkins() {
+// --- HELPER DATABASE FUNCTIONS (Synchronized with admin.titanrust.ru) ---
+
+function getAdminDb() {
+  if (fs.existsSync(ADMIN_DB_PATH)) {
+    const sqlite3 = require(path.join(__dirname, 'admin.titanrust.ru', 'server', 'node_modules', 'sqlite3')).verbose();
+    return new sqlite3.Database(ADMIN_DB_PATH);
+  }
+  return null;
+}
+
+function queryAdminDb(sql, params = []) {
+  return new Promise((resolve) => {
+    const db = getAdminDb();
+    if (!db) return resolve([]);
+    db.all(sql, params, (err, rows) => {
+      db.close();
+      if (err) resolve([]);
+      else resolve(rows || []);
+    });
+  });
+}
+
+// Get live items from Admin DB or fallback
+// Кэшируется на 30 с: каталог вырос до тысяч строк, а функция дёргается почти
+// из каждого игрового эндпоинта. Снятые с продажи предметы не отдаём.
+async function getLiveItems() {
+  return cached('liveItems', 30000, _getLiveItemsUncached);
+}
+
+async function _getLiveItemsUncached() {
+  let rows = await queryAdminDb(`SELECT * FROM items WHERE delisted = 0 ORDER BY price DESC`);
+  // Колонки delisted может ещё не быть — до первой миграции каталога.
+  if (!rows || rows.length === 0) {
+    rows = await queryAdminDb(`SELECT * FROM items ORDER BY price DESC`);
+  }
+  if (rows && rows.length > 0) {
+    return rows.map(r => ({
+      id: `db-${r.id}`,
+      name: r.name || r.market_hash_name,
+      marketHashName: r.market_hash_name,
+      price: r.price || 100,
+      priceText: `${r.price || 100} ₽`,
+      image: fixImageUrl(r.image),
+      rarity: (r.rarity || "rare").toLowerCase(),
+      colorHex: r.color ? `#${r.color}` : "#35a3f1",
+      upgraderEnabled: r.upgraderEnabled === 1
+    }));
+  }
+  
+  // Fallback to local skins.json
   if (fs.existsSync(SKINS_FILE)) {
     try {
       const data = JSON.parse(fs.readFileSync(SKINS_FILE, 'utf8'));
       if (data.skins && data.skins.length > 0) return data.skins;
-    } catch (e) {
-      console.error('Failed to parse skins.json:', e.message);
-    }
+    } catch (e) {}
   }
+
   return [
-    { id: "1", name: "AK-47 | Tempered", price: 4500, image: "/assets/battles/winner-boar.png", rarity: "mythic" },
-    { id: "2", name: "LR-300 | Victoria", price: 1200, image: "/assets/battles/boar-ready.png", rarity: "legendary" },
-    { id: "3", name: "MP5 | Cold Hunter", price: 350, image: "/assets/header/logo.webp", rarity: "rare" }
+    { id: "1", name: "AK-47 | Tempered", price: 4500, priceText: "4500 ₽", image: "/assets/battles/winner-boar.png", rarity: "mythic" },
+    { id: "2", name: "LR-300 | Victoria", price: 1200, priceText: "1200 ₽", image: "/assets/battles/boar-ready.png", rarity: "legendary" },
+    { id: "3", name: "MP5 | Cold Hunter", price: 350, priceText: "350 ₽", image: "/assets/header/logo.webp", rarity: "rare" }
   ];
 }
 
-// --- MOCK DATA DEFINITIONS USING LOCAL & SYNCED STEAM ASSETS ---
+// Get live series / categories from Admin DB with non-empty cases filtering
+async function getLiveSeries() {
+  const dbSeries = await queryAdminDb(`SELECT * FROM series WHERE status = 'active' ORDER BY id ASC`);
+  const dbCases = await queryAdminDb(`SELECT * FROM cases WHERE archived = 0 ORDER BY sortOrder ASC`);
+  const items = await getLiveItems();
 
+  // Helper to format case object for Vue frontend
+  const formatCase = (c) => {
+    const sId = c.seriesId ? parseInt(c.seriesId, 10) : (c.series_id ? parseInt(c.series_id, 10) : 1);
+    let img = c.image;
+    if (!img || img === "" || img === "/assets/header/logo.webp") {
+      img = "/uploads/cases/1786522990114-495918520.webp";
+    }
+    return {
+      id: c.slug || `case-${c.id}`,
+      slug: c.slug || `case-${c.id}`,
+      name: c.name || "Кейс",
+      category: c.category || "standard",
+      price: c.price || 49,
+      oldPrice: Math.round((c.price || 49) * 1.5),
+      image: img,
+      volatility: c.volatility || "AVERAGE",
+      isBlogger: c.isBlogger === 1,
+      seriesId: sId,
+      items: items.slice(0, 10)
+    };
+  };
+
+  const allFormattedCases = dbCases.map(formatCase);
+  const seriesList = [];
+  const assignedSlugs = new Set();
+
+  if (dbSeries && dbSeries.length > 0) {
+    for (const s of dbSeries) {
+      const sCases = allFormattedCases.filter(c => c.seriesId === s.id);
+      if (sCases.length > 0) {
+        sCases.forEach(c => assignedSlugs.add(c.slug));
+        seriesList.push({
+          id: s.id,
+          name: s.name || `Категория #${s.id}`,
+          description: s.description || "",
+          image: s.image || s.titleImage || "/uploads/series/1786522945847-911377162.webp",
+          titleImage: s.titleImage || s.image || "/uploads/series/1786522945847-911377162.webp",
+          sortOrder: s.sortOrder || s.position || 0,
+          isActive: true,
+          cases: sCases
+        });
+      }
+    }
+  }
+
+  // Handle any remaining unassigned cases
+  const unassignedCases = allFormattedCases.filter(c => !assignedSlugs.has(c.slug));
+  if (unassignedCases.length > 0) {
+    seriesList.unshift({
+      id: 1,
+      name: "Популярные Кейсы",
+      description: "",
+      sortOrder: 0,
+      isActive: true,
+      cases: unassignedCases
+    });
+  }
+
+  // If no series and no cases exist in DB, fallback to default mock series
+  if (seriesList.length === 0) {
+    return [
+      {
+        id: 1,
+        name: "Популярные Кейсы",
+        description: "",
+        sortOrder: 0,
+        isActive: true,
+        cases: [
+          {
+            id: "rust-starter",
+            slug: "rust-starter",
+            name: "Халявный Кабан",
+            category: "Популярные",
+            price: 49,
+            oldPrice: 99,
+            image: "/assets/header/logo.webp",
+            volatility: "AVERAGE",
+            isBlogger: false,
+            seriesId: 1,
+            items: items.slice(0, 5)
+          },
+          {
+            id: "weapon-set",
+            slug: "weapon-set",
+            name: "Оружейный Сет",
+            category: "Rust Базовые",
+            price: 199,
+            oldPrice: 299,
+            image: "/assets/header/logo.webp",
+            volatility: "AVERAGE",
+            isBlogger: false,
+            seriesId: 1,
+            items: items.slice(2, 8)
+          }
+        ]
+      }
+    ];
+  }
+
+  return seriesList;
+}
+
+// Get all live cases flat list
+async function getLiveCases() {
+  const series = await getLiveSeries();
+  const cases = series.flatMap(s => s.cases);
+  
+  // Deduplicate by slug
+  const uniqueMap = new Map();
+  cases.forEach(c => uniqueMap.set(c.slug, c));
+  return Array.from(uniqueMap.values());
+}
+
+// Get live banners from Admin DB or fallback
+async function getLiveBanners() {
+  const dbBanners = await queryAdminDb(`SELECT * FROM banners WHERE active = 1 ORDER BY position ASC`);
+  if (dbBanners && dbBanners.length > 0) {
+    return dbBanners.map(b => ({
+      id: `banner-${b.id}`,
+      title: b.title || "Делай нарезки\nлутай ещё больше",
+      description: "Конкурс моментов в тиктоке",
+      buttonText: "Участвовать",
+      buttonColor: "#e54b38",
+      buttonAction: "url",
+      buttonValue: b.url || "/giveaway",
+      glowColor: "#84c424",
+      borderColor: "#4d7318",
+      background: "radial-gradient(ellipse at 80% 50%, #2e4a0d 0%, #0d1405 100%)",
+      image: b.image || "/assets/battles/winner-boar.png",
+      video: "/assets/raffle/mega-loop.mp4"
+    }));
+  }
+
+  return [
+    {
+      id: "banner-tiktok",
+      title: "Делай нарезки\nлутай ещё больше",
+      description: "Конкурс моментов в тиктоке",
+      buttonText: "Участвовать",
+      buttonColor: "#e54b38",
+      buttonAction: "url",
+      buttonValue: "/giveaway",
+      glowColor: "#84c424",
+      borderColor: "#4d7318",
+      background: "radial-gradient(ellipse at 80% 50%, #2e4a0d 0%, #0d1405 100%)",
+      image: "/assets/battles/winner-boar.png",
+      video: "/assets/raffle/mega-loop.mp4"
+    },
+    {
+      id: "banner-battles",
+      title: "Кейс-Баттлы\nKaban.gg",
+      description: "Замесы 1v1, 2v2 и 4v4",
+      buttonText: "Играть",
+      buttonColor: "#84c424",
+      buttonAction: "url",
+      buttonValue: "/crate-pvp",
+      glowColor: "#84c424",
+      borderColor: "#4d7318",
+      background: "radial-gradient(ellipse at 80% 50%, #2e4a0d 0%, #0d1405 100%)",
+      image: "/assets/battles/boar-ready.png",
+      video: "/assets/raffle/mega-loop.webm"
+    }
+  ];
+}
+
+// --- MOCK USER & CONFIG ---
 const mockAvatar = "/avatars/fef49e7fa7e1997310d705b2a6158ff8dc1cdfeb_medium.jpg";
-const mockLogo = "/assets/header/logo.webp";
-const mockBoarWinner = "/assets/battles/winner-boar.png";
-const mockBoarReady = "/assets/battles/boar-ready.png";
-const mockRafflePoster = "/assets/raffle/mega-poster.webp";
 
 const mockConfig = {
   modes: [
@@ -84,73 +350,6 @@ let mockUser = {
   createdAt: new Date().toISOString()
 };
 
-function buildMockCases() {
-  const skins = getSyncedSkins();
-  return [
-    {
-      id: "rust-starter",
-      slug: "rust-starter",
-      name: "Халявный Кабан",
-      category: "Популярные",
-      price: 49,
-      oldPrice: 99,
-      image: mockLogo,
-      items: skins.slice(0, 5)
-    },
-    {
-      id: "weapon-set",
-      slug: "weapon-set",
-      name: "Оружейный Сет",
-      category: "Rust Базовые",
-      price: 199,
-      oldPrice: 299,
-      image: mockLogo,
-      items: skins.slice(2, 8)
-    },
-    {
-      id: "secret-drop",
-      slug: "secret-drop",
-      name: "Тайный Дроп",
-      category: "Тайные",
-      price: 499,
-      oldPrice: 750,
-      image: mockLogo,
-      items: skins.slice(0, 4)
-    }
-  ];
-}
-
-const mockBanners = [
-  {
-    id: "banner-tiktok",
-    title: "Делай нарезки\nлутай ещё больше",
-    description: "Конкурс моментов в тиктоке",
-    buttonText: "Участвовать",
-    buttonColor: "#e54b38",
-    buttonAction: "url",
-    buttonValue: "/giveaway",
-    glowColor: "#84c424",
-    borderColor: "#4d7318",
-    background: "radial-gradient(ellipse at 80% 50%, #2e4a0d 0%, #0d1405 100%)",
-    image: mockBoarWinner,
-    video: "/assets/raffle/mega-loop.mp4"
-  },
-  {
-    id: "banner-battles",
-    title: "Кейс-Баттлы\nKaban.gg",
-    description: "Замесы 1v1, 2v2 и 4v4",
-    buttonText: "Играть",
-    buttonColor: "#84c424",
-    buttonAction: "url",
-    buttonValue: "/crate-pvp",
-    glowColor: "#84c424",
-    borderColor: "#4d7318",
-    background: "radial-gradient(ellipse at 80% 50%, #2e4a0d 0%, #0d1405 100%)",
-    image: mockBoarReady,
-    video: "/assets/raffle/mega-loop.webm"
-  }
-];
-
 const mockStats = {
   onlineCount: 412,
   openedCasesCount: 128450,
@@ -158,43 +357,432 @@ const mockStats = {
   battlesCount: 18920
 };
 
+// --- ЛЕНТА ДРОПОВ -----------------------------------------------------------
+// Кольцевой буфер реальных выигрышей + синтетический наполнитель, чтобы лента
+// не была пустой на старте. Реальные открытия кейсов попадают сюда из
+// POST /cases/open и вытесняют синтетику.
+
+const LIVE_FEED_MAX = 200;
+const realDrops = [];              // самые свежие в начале
+
+const FEED_NAMES = [
+  'Кабан', 'RustLord', 'Шрам', 'Тихий', 'Барсук', 'Никита', 'Волк', 'Прапор',
+  'Сталкер', 'Мясник', 'Хантер', 'Гоша', 'Рейдер', 'Пепел', 'Тайга'
+];
+
+function makeWin({ item, user, eventType = 'CASE', caseSlug = '', caseImage = null, betAmount = 0, multiplier = 1, wonAt }) {
+  const value = Number(item.price) || 0;
+  return {
+    sourceEventId: `${eventType}-${wonAt}-${Math.random().toString(36).slice(2, 8)}`,
+    userId: user.id ?? 0,
+    userName: user.name,
+    avatarUrl: user.avatar || mockAvatar,
+    steamLevel: user.steamLevel ?? 0,
+    wonAt,
+    eventType,
+    itemName: item.name,
+    itemImage: fixImageUrl(item.image),
+    itemValue: value,
+    betAmount,
+    winAmount: value,
+    multiplier,
+    isBigWin: value >= 5000,
+    caseImage,
+    caseSlug,
+    itemColor: item.colorHex || item.color || null,
+    itemRarity: mapRarity(item.rarity)
+  };
+}
+
+/** Реальный выигрыш — вызывается при открытии кейса. */
+function pushLiveDrop(win) {
+  realDrops.unshift(win);
+  if (realDrops.length > LIVE_FEED_MAX) realDrops.length = LIVE_FEED_MAX;
+}
+
+// Синтетика пересобирается раз в 30 с, поэтому лента выглядит живой даже
+// без игроков. Веса подобраны так, чтобы дорогие предметы падали редко.
+let syntheticFeed = [];
+let syntheticAt = 0;
+
+async function buildSyntheticFeed() {
+  const items = await getLiveItems();
+  if (!items.length) return [];
+  const cheap = items.filter(i => i.price < 1000);
+  const mid = items.filter(i => i.price >= 1000 && i.price < 10000);
+  const rich = items.filter(i => i.price >= 10000);
+  const pick = () => {
+    const r = Math.random();
+    const pool = r < 0.75 ? cheap : r < 0.96 ? mid : rich;
+    const src = pool.length ? pool : items;
+    return src[Math.floor(Math.random() * src.length)];
+  };
+
+  const now = Math.floor(Date.now() / 1000);
+  const out = [];
+  for (let i = 0; i < LIVE_FEED_MAX; i++) {
+    const item = pick();
+    out.push(makeWin({
+      item,
+      user: { id: 1000 + i, name: FEED_NAMES[i % FEED_NAMES.length] + (i % 7 ? '' : '_' + (10 + i)), avatar: mockAvatar, steamLevel: (i * 7) % 60 },
+      eventType: i % 9 === 0 ? 'UPGRADER' : i % 5 === 0 ? 'BATTLE' : 'CASE',
+      betAmount: Math.round(item.price * (0.4 + Math.random() * 0.5)),
+      multiplier: 1,
+      wonAt: now - i * 11
+    }));
+  }
+  return out;
+}
+
+async function getLiveFeed(mode, limit) {
+  if (Date.now() - syntheticAt > 30000 || !syntheticFeed.length) {
+    syntheticFeed = await buildSyntheticFeed();
+    syntheticAt = Date.now();
+  }
+  const all = [...realDrops, ...syntheticFeed];
+  if (mode === 'top' || mode === 'bigwins') {
+    return [...all].sort((a, b) => b.itemValue - a.itemValue).slice(0, limit);
+  }
+  return all.slice(0, limit);   // live — по свежести
+}
+
 // --- STEAM SYNC ADMIN & PUBLIC ENDPOINTS ---
 
-// Admin Trigger Steam Skins Sync
+// Ручной запуск/остановка фонового обхода каталога.
 app.post(['/api/v1/admin/sync-skins', '/api/v1/skins/sync'], async (req, res) => {
   try {
-    const count = req.body?.count || 50;
-    const result = await syncRustSkins(count);
-    res.json({
-      status: "success",
-      message: `Синхронизировано ${result.skins.length} скинов из Steam Community Market`,
-      data: result
-    });
+    if (req.body?.action === 'stop') {
+      stopCatalogWorker();
+      return res.json({ status: "success", message: "Обход каталога остановлен", data: getCatalogStatus() });
+    }
+    const st = getCatalogStatus();
+    if (st.running) {
+      return res.json({
+        status: "success",
+        message: `Обход уже идёт: ${st.offset} из ${st.totalCount || '?'}`,
+        data: st
+      });
+    }
+    startCatalogWorker();
+    res.json({ status: "success", message: "Обход каталога запущен", data: getCatalogStatus() });
   } catch (e) {
     res.status(500).json({ status: "error", message: e.message });
   }
 });
 
-// Get Synced Skins Catalog
-app.get('/api/v1/skins', (req, res) => {
-  const skins = getSyncedSkins();
-  res.json({ status: "success", count: skins.length, data: skins });
+// Прогресс синхронизации — для админки и для проверки руками.
+app.get(['/api/v1/skins/status', '/api/v1/admin/sync-skins/status'], (req, res) => {
+  const st = getCatalogStatus();
+  res.json({
+    status: "success",
+    data: {
+      ...st,
+      etaHuman: st.etaMs != null ? `${Math.round(st.etaMs / 60000)} мин` : null,
+      progressPercent: st.totalCount ? +((st.offset / st.totalCount) * 100).toFixed(1) : 0
+    }
+  });
 });
 
-// --- MOCK API ROUTE HANDLERS ---
-
-// Auth endpoints
-app.all(['/api/v1/auth/refresh', '/api/v1/auth/me', '/api/v1/auth/steam', '/api/v1/auth/login/email', '/api/v1/auth/register/email'], (req, res) => {
-  res.json({ status: "success", data: { user: mockUser, token: "mock_token_12345" } });
+// Сводка по редкостям (кэш 30 с).
+app.get('/api/v1/skins/rarities', async (req, res) => {
+  res.json({ status: "success", data: await cached('rarities', 30000, getRarityBreakdown) });
 });
 
-app.all('/api/v1/auth/logout', (req, res) => {
-  res.json({ status: "success", message: "Logged out" });
+// Каталог предметов: фильтры + постраничная выдача, кэш 30 с.
+// Отдаём из SQLite, в Steam на запрос пользователя не ходим никогда.
+app.get('/api/v1/skins', async (req, res) => {
+  const { rarity, minPrice, maxPrice, search } = req.query;
+  const limit = Math.min(parseInt(req.query.limit) || 100, 1000);
+  const offset = parseInt(req.query.offset) || 0;
+  const key = `skins:${rarity || ''}:${minPrice || ''}:${maxPrice || ''}:${search || ''}:${limit}:${offset}`;
+
+  const result = await cached(key, 30000, () => queryItems({
+    rarity, minPrice, maxPrice, search, limit, offset
+  }));
+
+  res.json({
+    status: "success",
+    count: result.items.length,
+    total: result.total,
+    limit,
+    offset,
+    data: result.items
+  });
 });
+
+// --- CASES & SERIES API ROUTES (Fully Synced with Vue 3 Frontend Schema) ---
+
+app.get('/api/v1/cases/series', async (req, res) => {
+  const seriesList = await getLiveSeries();
+  res.json({ status: "success", data: { series: seriesList } });
+});
+
+app.get('/api/v1/cases', async (req, res) => {
+  const cases = await getLiveCases();
+  res.json({
+    status: "success",
+    data: {
+      cases: cases,
+      page: 1,
+      limit: 100,
+      total: cases.length
+    }
+  });
+});
+
+app.get('/api/v1/cases/limited/remaining', (req, res) => {
+  res.json({ status: "success", data: { remaining: 50, supplyTotal: 100 } });
+});
+
+app.get('/api/v1/cases/secret/state', (req, res) => {
+  res.json({ status: "success", data: { enabled: true, revealedCount: 3 } });
+});
+
+app.get('/api/v1/cases/:slug/grid', async (req, res) => {
+  const skins = await getLiveItems();
+  res.json({ status: "success", data: skins });
+});
+
+app.get('/api/v1/cases/:slug/best', async (req, res) => {
+  try {
+    const slug = req.params.slug;
+    const dbCases = await queryAdminDb(`SELECT * FROM cases WHERE slug = ? OR id = ?`, [slug, slug]);
+    const c = dbCases[0];
+    const items = await getCaseItemsFromDb(c ? c.id : null);
+    const nowSec = Math.floor(Date.now() / 1000);
+
+    const drops = items.slice(0, 5).map((it, idx) => ({
+      itemId: it.id,
+      id: it.id,
+      name: it.name,
+      imageUrl: fixImageUrl(it.image),
+      image: fixImageUrl(it.image),
+      value: it.price,
+      price: it.price,
+      rarity: it.rarity || "GOLD",
+      color: it.color ? it.color.replace('#', '') : "eb4b4b",
+      userId: `user-${idx + 1}`,
+      userName: `Player_${idx + 1}`,
+      openedAt: nowSec - (idx * 3600)
+    }));
+
+    res.json({ status: "success", data: { drops: drops } });
+  } catch (e) {
+    res.json({ status: "success", data: { drops: [] } });
+  }
+});
+
+app.get('/api/v1/cases/:slug', async (req, res) => {
+  try {
+    const slug = req.params.slug;
+    let dbCases = await queryAdminDb(`SELECT * FROM cases WHERE slug = ? OR id = ?`, [slug, slug]);
+    let c = dbCases[0];
+
+    if (!c) {
+      const all = await queryAdminDb(`SELECT * FROM cases WHERE archived = 0 OR isActive = 1 ORDER BY id ASC LIMIT 1`);
+      c = all[0];
+    }
+
+    const requestedSlug = slug || (c ? c.slug : "rust-starter");
+
+    const caseObj = {
+      id: requestedSlug,
+      slug: requestedSlug,
+      name: c ? (c.name || "Кейс Kaban.gg") : "Халявный Кабан",
+      category: c ? (c.category || "standard") : "standard",
+      price: c ? (c.price || 49) : 49,
+      oldPrice: Math.round((c ? (c.price || 49) : 49) * 1.5),
+      image: fixImageUrl(c ? c.image : "/assets/header/logo.webp"),
+      volatility: (c ? (c.volatility || "AVERAGE") : "AVERAGE").toUpperCase(),
+      isActive: c ? (c.isActive === 1 || c.status === 'active' || c.isActive == null) : true,
+      seriesId: c ? (c.seriesId || c.series_id || 1) : 1,
+      limited: c ? c.isLimited === 1 : false,
+      secret: c ? c.isSecret === 1 : false
+    };
+
+    const items = await getCaseItemsFromDb(c ? c.id : null);
+
+    res.json({
+      status: "success",
+      data: {
+        case: caseObj,
+        items: items && items.length > 0 ? items : await getFallbackItems()
+      }
+    });
+  } catch (e) {
+    console.error("GET /cases/:slug error:", e);
+    const requestedSlug = req.params.slug || "rust-starter";
+    res.json({
+      status: "success",
+      data: {
+        case: {
+          id: requestedSlug,
+          slug: requestedSlug,
+          name: "Кейс Kaban.gg",
+          category: "standard",
+          price: 49,
+          oldPrice: 99,
+          image: "/assets/header/logo.webp",
+          volatility: "AVERAGE",
+          isActive: true,
+          seriesId: 1,
+          limited: false,
+          secret: false
+        },
+        items: await getFallbackItems()
+      }
+    });
+  }
+});
+
+function mapRarity(r) {
+  if (!r) return "REGULAR";
+  const upper = String(r).toUpperCase().trim();
+  if (upper === "COVERT" || upper === "MYTHIC" || upper === "GOLD") return "GOLD";
+  if (upper === "CLASSIFIED" || upper === "LEGENDARY" || upper === "VIOLET") return "VIOLET";
+  if (upper === "RESTRICTED" || upper === "RARE") return "RARE";
+  if (upper === "MIL_SPEC" || upper === "UNUSUAL") return "UNUSUAL";
+  return "REGULAR";
+}
+
+async function getCaseItemsFromDb(caseId) {
+  if (caseId) {
+    const rows = await queryAdminDb(`
+      SELECT ci.*, i.name, i.price, i.image, i.rarity, i.color, i.market_hash_name
+      FROM case_items ci
+      JOIN items i ON ci.item_id = i.id
+      WHERE ci.case_id = ?
+    `, [caseId]);
+
+    if (rows && rows.length > 0) {
+      return rows.map(r => ({
+        id: r.item_id || r.id,
+        name: r.name || r.market_hash_name || "Rust Skin Item",
+        price: r.price || 100,
+        image: fixImageUrl(r.image),
+        rarity: mapRarity(r.rarity),
+        color: r.color ? (r.color.startsWith('#') ? r.color : `#${r.color}`) : "#eb4b4b",
+        chance: r.chance || 10
+      }));
+    }
+  }
+
+  return await getFallbackItems();
+}
+
+async function getFallbackItems() {
+  const liveItems = await getLiveItems();
+  if (liveItems && liveItems.length > 0) {
+    return liveItems.map(it => ({
+      id: typeof it.id === 'string' && it.id.startsWith('db-') ? parseInt(it.id.replace('db-', '')) : (parseInt(it.id) || 1),
+      name: it.name || "Rust Skin Item",
+      price: it.price || 100,
+      image: fixImageUrl(it.image),
+      rarity: mapRarity(it.rarity),
+      color: it.colorHex || it.color || "#eb4b4b",
+      chance: 10
+    }));
+  }
+  return [
+    { id: 1, name: "AK-47 | Tempered", price: 4500, image: "/assets/battles/winner-boar.png", rarity: "GOLD", color: "#eb4b4b", chance: 10 },
+    { id: 2, name: "LR-300 | Victoria", price: 1200, image: "/assets/battles/boar-ready.png", rarity: "VIOLET", color: "#a33ee2", chance: 15 },
+    { id: 3, name: "MP5 | Cold Hunter", price: 350, image: "/assets/header/logo.webp", rarity: "RARE", color: "#65dc04", chance: 25 },
+    { id: 4, name: "Metal Facemask", price: 850, image: "/assets/battles/winner-boar.png", rarity: "VIOLET", color: "#a33ee2", chance: 20 },
+    { id: 5, name: "Whiteout Semi-Automatic Pistol", price: 2400, image: "/assets/header/logo.webp", rarity: "UNUSUAL", color: "#4076ff", chance: 30 }
+  ];
+}
+
+app.post(['/api/v1/cases/open', '/api/v1/cases/:slug/open'], async (req, res) => {
+  try {
+    const slug = req.body.slug || req.params.slug || 'limit';
+    const quantity = parseInt(req.body.quantity || req.body.count || 1) || 1;
+
+    const dbCases = await queryAdminDb(`SELECT * FROM cases WHERE slug = ? OR id = ?`, [slug, slug]);
+    const c = dbCases[0];
+    const casePrice = c ? (c.price || 49) : 49;
+    const totalCost = casePrice * quantity;
+
+    if (mockUser.balance >= totalCost) {
+      mockUser.balance -= totalCost;
+    }
+
+    const items = await getCaseItemsFromDb(c ? c.id : null);
+    const drops = [];
+    const nowSec = Math.floor(Date.now() / 1000);
+
+    for (let i = 0; i < quantity; i++) {
+      const winningItem = items.length > 0 ? items[Math.floor(Math.random() * items.length)] : {
+        id: 9,
+        name: "Dragon Lore Bolt Rifle",
+        price: 18500,
+        image: "https://community.cloudflare.steamstatic.com/economy/image/-9a81dlDragonLore",
+        rarity: "GOLD",
+        color: "#eb4b4b"
+      };
+
+      // Реальное открытие попадает в живую ленту и вытесняет синтетику.
+      pushLiveDrop(makeWin({
+        item: {
+          name: winningItem.name,
+          price: winningItem.price,
+          image: winningItem.image,
+          rarity: winningItem.rarity,
+          colorHex: winningItem.color
+        },
+        user: { id: mockUser.id, name: mockUser.username, avatar: mockUser.avatar },
+        eventType: 'CASE',
+        caseSlug: slug,
+        caseImage: c ? c.image : null,
+        betAmount: casePrice,
+        wonAt: nowSec
+      }));
+
+      drops.push({
+        itemId: winningItem.id,
+        id: winningItem.id,
+        name: winningItem.name,
+        imageUrl: fixImageUrl(winningItem.image),
+        image: fixImageUrl(winningItem.image),
+        value: winningItem.price,
+        price: winningItem.price,
+        rarity: winningItem.rarity || "GOLD",
+        color: winningItem.color ? winningItem.color.replace('#', '') : "eb4b4b",
+        userId: mockUser.id,
+        userName: mockUser.username,
+        openedAt: nowSec
+      });
+    }
+
+    res.json({
+      status: "success",
+      data: {
+        gameId: Date.now(),
+        drops: drops,
+        newBalance: mockUser.balance,
+        serverHash: "server_hash_" + Date.now(),
+        clientSeed: "client_seed_" + Date.now(),
+        nonce: 1
+      }
+    });
+  } catch (e) {
+    console.error("POST /cases/open error:", e);
+    res.status(500).json({ status: "error", message: e.message });
+  }
+});
+
+// --- MOCK & ADMIN SYNCHRONIZED API ROUTES ---
+
+// --- AUTH: вход через Steam OpenID (services/auth.js) ---
+// Регистрирует /auth/steam, /auth/steam/return, /auth/refresh, /auth/me, /auth/logout
+// и вешает attachAuth: после него req.auth = payload Bearer-токена (или null).
+registerAuthRoutes(app, { mockUser });
 
 // User profile endpoints
-app.get(['/api/v1/user', '/api/v1/user/me', '/api/v1/users/me', '/api/v1/profile'], (req, res) => {
-  res.json({ status: "success", data: mockUser });
+// Всегда 200. Гостю отдаём пустой профиль: 401 здесь вешает фронт намертво
+// (см. комментарий к guestUser() в services/auth.js).
+app.get(['/api/v1/user', '/api/v1/user/me', '/api/v1/users/me', '/api/v1/profile'], async (req, res) => {
+  const user = await currentUser(req, mockUser);
+  res.json({ status: "success", data: user || guestUser() });
 });
 
 app.get('/api/v1/user/stats', (req, res) => {
@@ -205,14 +793,34 @@ app.get('/api/v1/user/ban-status', (req, res) => {
   res.json({ status: "success", data: { banned: false } });
 });
 
-app.get('/api/v1/user/favorites', (req, res) => {
-  const cases = buildMockCases();
-  res.json({ status: "success", data: [cases[0].id] });
+app.get('/api/v1/user/favorites', async (req, res) => {
+  const cases = await getLiveCases();
+  res.json({ status: "success", data: [cases[0]?.id || "rust-starter"] });
 });
 
-app.put(['/api/v1/user/tradeurl', '/api/v1/user/display-name', '/api/v1/user/avatar'], (req, res) => {
-  if (req.body.tradeLink) mockUser.tradeLink = req.body.tradeLink;
-  if (req.body.username) mockUser.username = req.body.username;
+app.put(['/api/v1/user/tradeurl', '/api/v1/user/display-name', '/api/v1/user/avatar'], async (req, res) => {
+  const tradeLink = req.body.tradeLink || req.body.tradeUrl;
+  const username = req.body.username || req.body.displayName;
+
+  // Авторизованный пользователь — пишем в БД, иначе правим мок (dev).
+  if (req.auth && !req.auth.mock) {
+    const sets = [];
+    const params = [];
+    if (tradeLink) { sets.push('trade_link = ?'); params.push(tradeLink); }
+    if (username) { sets.push('username = ?'); params.push(username); }
+    if (sets.length) {
+      params.push(req.auth.sub);
+      await new Promise((resolve) => {
+        const db = getAdminDb();
+        if (!db) return resolve();
+        db.run(`UPDATE users SET ${sets.join(', ')} WHERE id = ?`, params, () => { db.close(); resolve(); });
+      });
+    }
+    return res.json({ status: "success", data: await currentUser(req, mockUser) });
+  }
+
+  if (tradeLink) mockUser.tradeLink = tradeLink;
+  if (username) mockUser.username = username;
   res.json({ status: "success", data: mockUser });
 });
 
@@ -255,29 +863,32 @@ app.get('/api/v1/promo/active', (req, res) => {
   res.json({ status: "success", data: null });
 });
 
-// Banners
-app.get(['/api/v1/banners', '/api/v1/banner', '/banners'], (req, res) => {
+// Banners (Synchronized with admin.titanrust.ru)
+app.get(['/api/v1/banners', '/api/v1/banner', '/banners'], async (req, res) => {
+  const banners = await getLiveBanners();
   res.json({
     status: "success",
     data: {
-      banners: mockBanners
+      banners: banners
     }
   });
 });
 
 // Live recent drops
-app.get(['/api/v1/live/recent', '/api/v1/drops/recent'], (req, res) => {
-  const skins = getSyncedSkins();
-  const recent = skins.slice(0, 5).map((s, idx) => ({
-    id: `drop-${idx + 1}`,
-    user: `Player_${idx + 1}`,
-    avatar: mockAvatar,
-    itemName: s.name,
-    itemPrice: s.price,
-    image: s.image,
-    rarity: s.rarity
-  }));
-  res.json({ status: "success", data: recent });
+// Лента дропов.
+//
+// Форма ответа снята с бандла (store-CfUBv1CE.js):
+//   data.wins[].{ sourceEventId, userId, userName, avatarUrl, steamLevel, wonAt,
+//                 eventType, itemName, itemImage, itemValue, betAmount, winAmount,
+//                 multiplier, isBigWin, caseImage, caseSlug, itemColor, itemRarity }
+// eventType — ключ карты {CASE:"case", BATTLE:"cratebattle", UPGRADER:"upgrader"}.
+// itemRarity проходит валидатор из rarity-*.js, поэтому только пять тиров сайта.
+// Раньше сервер отдавал плоский массив с другими именами полей — фронт читал
+// data.wins, получал undefined, и лента оставалась пустой.
+app.get(['/api/v1/live/recent', '/api/v1/drops/recent'], async (req, res) => {
+  const mode = String(req.query.mode || 'live');
+  const limit = Math.min(parseInt(req.query.limit) || 40, 100);
+  res.json({ status: "success", data: { wins: await getLiveFeed(mode, limit) } });
 });
 
 // Stats
@@ -286,18 +897,91 @@ app.get(['/api/v1/stats/global', '/api/v1/stats'], (req, res) => {
 });
 
 // Deposit chain state
-app.get('/api/v1/deposit-chain/state', (req, res) => {
-  res.json({ status: "success", data: { active: true, step: 1 } });
+// «Бесплатные кейсы за депозит».
+//
+// Контракт снят с useDepositChain-CTOMFCQw.js:
+//   data.{ showLadder, variant, completed, currency, activeTierIndex, tiers }
+//   tiers[].{ threshold, collected, tierIndex, status }   status:'ready' — можно открыть
+//
+// Важно: блок рендерится только когда enabled = isAuthed && isDepositChainEnabled.
+// Гостю он не покажется независимо от ответа сервера — это поведение фронта.
+// Раньше tiers был пустым массивом, поэтому блок не появлялся и у авторизованных.
+const DEPOSIT_TIERS = [
+  { name: 'Камень',  threshold: 0,    image: '/uploads/cases/1786522990114-495918520.webp' },
+  { name: 'Лук',     threshold: 174,  image: '/uploads/cases/1786522990114-495918520.webp' },
+  { name: 'Двушка',  threshold: 384,  image: '/uploads/cases/1786522990114-495918520.webp' },
+  { name: 'Томпсон', threshold: 821,  image: '/uploads/cases/1786522990114-495918520.webp' },
+  { name: 'Калаш',   threshold: 1166, image: '/uploads/cases/1786522990114-495918520.webp' }
+];
+
+app.get(['/api/v1/deposit-chain/state', '/api/v1/deposit-chain'], async (req, res) => {
+  const user = await currentUser(req, mockUser);
+  const collected = Number(user && !user.isGuest ? user.depositTotal || 0 : 0);
+
+  const tiers = DEPOSIT_TIERS.map((t, i) => ({
+    tierIndex: i,
+    name: t.name,
+    image: t.image,
+    threshold: t.threshold,
+    collected: Math.min(collected, t.threshold),
+    status: collected >= t.threshold ? 'ready' : 'locked'
+  }));
+  const activeTierIndex = Math.min(tiers.filter(t => t.status === 'ready').length, tiers.length - 1);
+
+  res.json({
+    status: "success",
+    data: {
+      active: true,
+      step: activeTierIndex + 1,
+      showLadder: true,
+      variant: "A",
+      completed: activeTierIndex >= tiers.length - 1 && collected >= DEPOSIT_TIERS[DEPOSIT_TIERS.length - 1].threshold,
+      currency: "RUB",
+      activeTierIndex,
+      tiers
+    }
+  });
 });
 
 // Upgrader endpoints
-app.get(['/api/v1/upgrader/items', '/api/v1/upgrader'], (req, res) => {
-  const skins = getSyncedSkins();
-  res.json({ status: "success", data: skins });
+// Каталог апгрейдера.
+//
+// Форма ответа снята с бандла (index-BHZ_nufV.js):
+//   queryFn -> e.items, getNextPageParam -> e.pagination.{page,limit,total}
+// то есть items и pagination лежат на ВЕРХНЕМ уровне тела, а не внутри data.
+// Фронт шлёт page, limit, priceMin, priceMax, search, sort.
+//
+// Раньше отдавался плоский массив всего каталога (1.9 МБ на запрос), фронт
+// читал e.items -> undefined и показывал «Предметы не найдены».
+app.get(['/api/v1/upgrader/items', '/api/v1/upgrader'], async (req, res) => {
+  const page = Math.max(parseInt(req.query.page) || 1, 1);
+  const limit = Math.min(parseInt(req.query.limit) || 48, 200);
+  const sort = String(req.query.sort || 'desc').toLowerCase() === 'asc' ? 'asc' : 'desc';
+
+  const result = await cached(
+    `upg:${page}:${limit}:${req.query.priceMin || ''}:${req.query.priceMax || ''}:${req.query.search || ''}:${sort}`,
+    30000,
+    () => queryItems({
+      search: req.query.search,
+      minPrice: req.query.priceMin != null ? Number(req.query.priceMin) : undefined,
+      maxPrice: req.query.priceMax != null ? Number(req.query.priceMax) : undefined,
+      limit,
+      offset: (page - 1) * limit,
+      sort
+    })
+  );
+
+  res.json({
+    status: "success",
+    items: result.items,
+    pagination: { page, limit, total: result.total },
+    // Дубль под общий конверт — на случай, если другой экран читает data.items.
+    data: { items: result.items, pagination: { page, limit, total: result.total } }
+  });
 });
 
-app.post('/api/v1/upgrader/place', (req, res) => {
-  const skins = getSyncedSkins();
+app.post('/api/v1/upgrader/place', async (req, res) => {
+  const skins = await getLiveItems();
   const won = Math.random() > 0.4;
   const targetItem = skins[0];
   if (won) mockUser.balance += targetItem.price;
@@ -316,55 +1000,9 @@ app.post('/api/v1/upgrader/offer/accept', (req, res) => {
   res.json({ status: "success", message: "Предмет успешно получен" });
 });
 
-// Cases & Case Opening
-app.get('/api/v1/cases', (req, res) => {
-  res.json({ status: "success", data: buildMockCases() });
-});
-
-app.get('/api/v1/cases/series', (req, res) => {
-  res.json({ status: "success", data: [] });
-});
-
-app.get('/api/v1/cases/limited/remaining', (req, res) => {
-  res.json({ status: "success", data: {} });
-});
-
-app.get('/api/v1/cases/secret/state', (req, res) => {
-  res.json({ status: "success", data: { enabled: true } });
-});
-
-app.get('/api/v1/cases/:slug/grid', (req, res) => {
-  const skins = getSyncedSkins();
-  res.json({ status: "success", data: skins });
-});
-
-app.get('/api/v1/cases/:slug/best', (req, res) => {
-  const skins = getSyncedSkins();
-  res.json({ status: "success", data: skins[0] });
-});
-
-app.get('/api/v1/cases/:slug', (req, res) => {
-  const cases = buildMockCases();
-  const c = cases.find(x => x.slug === req.params.slug) || cases[0];
-  res.json({ status: "success", data: c });
-});
-
-app.post('/api/v1/cases/open', (req, res) => {
-  const skins = getSyncedSkins();
-  const winningItem = skins[Math.floor(Math.random() * skins.length)];
-  mockUser.balance = Math.max(0, mockUser.balance - 49);
-  res.json({
-    status: "success",
-    data: {
-      item: winningItem,
-      newBalance: mockUser.balance
-    }
-  });
-});
-
 // Giveaways endpoints
-app.get('/api/v1/giveaways/active-mega', (req, res) => {
-  const skins = getSyncedSkins();
+app.get('/api/v1/giveaways/active-mega', async (req, res) => {
+  const skins = await getLiveItems();
   res.json({
     status: "success",
     data: {
@@ -374,13 +1012,12 @@ app.get('/api/v1/giveaways/active-mega', (req, res) => {
       price: skins[0]?.price || 2500,
       participantsCount: 892,
       endsAt: new Date(Date.now() + 604800000).toISOString(),
-      image: skins[0]?.image || mockRafflePoster
+      image: skins[0]?.image || "/assets/raffle/mega-poster.webp"
     }
   });
 });
 
 app.get(['/api/v1/giveaway', '/api/v1/giveaways'], (req, res) => {
-  const cases = buildMockCases();
   res.json({
     status: "success",
     data: [
@@ -391,7 +1028,7 @@ app.get(['/api/v1/giveaway', '/api/v1/giveaways'], (req, res) => {
         price: 4500,
         participantsCount: 142,
         endsAt: new Date(Date.now() + 86400000).toISOString(),
-        image: mockBoarWinner
+        image: "/assets/battles/winner-boar.png"
       }
     ]
   });
@@ -402,8 +1039,8 @@ app.post('/api/v1/giveaways/:id/join', (req, res) => {
 });
 
 // Crate PVP / Battles endpoints
-app.get(['/api/v1/crate-pvp', '/api/v1/battles'], (req, res) => {
-  const cases = buildMockCases();
+app.get(['/api/v1/crate-pvp', '/api/v1/battles'], async (req, res) => {
+  const cases = await getLiveCases();
   res.json({
     status: "success",
     data: [
@@ -421,8 +1058,8 @@ app.get(['/api/v1/crate-pvp', '/api/v1/battles'], (req, res) => {
   });
 });
 
-app.post('/api/v1/battles/create', (req, res) => {
-  const cases = buildMockCases();
+app.post('/api/v1/battles/create', async (req, res) => {
+  const cases = await getLiveCases();
   const newBattle = {
     id: "b-" + Date.now(),
     name: "Замес #2",
@@ -511,9 +1148,18 @@ app.use('/png', express.static(path.join(PUBLIC_DIR, 'png')));
 app.use('/svg', express.static(path.join(PUBLIC_DIR, 'svg')));
 app.use('/image', express.static(path.join(PUBLIC_DIR, 'image')));
 app.use('/packs', express.static(path.join(PUBLIC_DIR, 'packs')));
+app.use('/uploads', express.static(path.join(PUBLIC_DIR, 'uploads')));
 
 // Main assets directory
-app.use('/assets', express.static(path.join(PUBLIC_DIR, 'assets')));
+app.use('/assets', express.static(path.join(PUBLIC_DIR, 'assets'), {
+  setHeaders: (res, filePath) => {
+    if (filePath.endsWith('.js') || filePath.endsWith('.html')) {
+      res.setHeader('Cache-Control', 'no-cache, no-store, must-revalidate');
+      res.setHeader('Pragma', 'no-cache');
+      res.setHeader('Expires', '0');
+    }
+  }
+}));
 
 // Static root files with known extensions only
 app.use((req, res, next) => {
@@ -529,27 +1175,63 @@ app.use((req, res, next) => {
 app.get('*', (req, res) => {
   const indexPath = path.join(PUBLIC_DIR, 'index.html');
   if (fs.existsSync(indexPath)) {
+    res.setHeader('Cache-Control', 'no-cache, no-store, must-revalidate');
+    res.setHeader('Pragma', 'no-cache');
+    res.setHeader('Expires', '0');
     res.type('html').sendFile(indexPath);
   } else {
     res.status(404).send('index.html not found');
   }
 });
 
-// Automatic initial Steam sync on startup if skins.json missing or older than 1 hour
-(async () => {
-  if (!fs.existsSync(SKINS_FILE)) {
-    try {
-      await syncRustSkins(50);
-    } catch (e) {
-      console.error('[Startup] Steam sync notice:', e.message);
-    }
-  }
-})();
+// Server instance
+const server = http.createServer(app);
+const wss = new WebSocketServer({ server, path: '/ws' });
 
-app.listen(PORT, () => {
+wss.on('connection', (ws) => {
+  ws.send(JSON.stringify({ event: 'connected', data: { status: 'online' } }));
+  ws.on('message', async (msg) => {
+    try {
+      const parsed = JSON.parse(msg);
+      if (parsed.action === 'auth' || parsed.event === 'auth') {
+        // Токен приходит от того же access-JWT, что и в Authorization-заголовке.
+        const payload = verifyJWT(parsed.token || parsed.data?.token);
+        const user = payload && !payload.mock
+          ? await currentUser({ auth: payload }, mockUser)
+          : (ALLOW_MOCK_AUTH ? mockUser : null);
+        ws.send(JSON.stringify(
+          user
+            ? { event: 'authenticated', data: { user } }
+            : { event: 'unauthorized', data: {} }
+        ));
+      }
+    } catch(e) {}
+  });
+});
+
+server.listen(PORT, async () => {
+  await ensureAuthSchema();
+
+  // Фоновый обход каталога Steam. Отключается STEAM_CATALOG_SYNC=0.
+  const catalogEnabled = process.env.STEAM_CATALOG_SYNC !== '0';
+  if (catalogEnabled) {
+    const db = openCatalogDb();
+    if (db) { await ensureCatalogSchema(db); db.close(); }
+    startCatalogWorker();
+  }
+
   console.log(`================================================`);
-  console.log(` NewCasesRust Steam Synced App running at: http://localhost:${PORT}`);
-  console.log(` Serving production static files from: ${PUBLIC_DIR}`);
-  console.log(` Live Steam API Key: F08021AF0F2223EBD08820781CBC2B2D connected!`);
+  console.log(` NewCasesRust WebSocket & SPA Server at: http://localhost:${PORT}`);
+  console.log(` Public URL (Steam realm):  ${PUBLIC_URL}`);
+  console.log(` Steam return_to:           ${PUBLIC_URL}/api/v1/auth/steam/return`);
+  console.log(` Admin DB Connected: ${ADMIN_DB_PATH}`);
+  console.log(` WebSocket /ws Active on Port ${PORT}`);
+  console.log(` Каталог Steam: ${catalogEnabled
+    ? `обход включён (${CATALOG_PAGE_SIZE} поз./запрос, интервал ${CATALOG_INTERVAL_MS} мс)`
+    : 'выключен (STEAM_CATALOG_SYNC=0)'}`);
+  if (ALLOW_MOCK_AUTH) {
+    console.log(` [!] ALLOW_MOCK_AUTH включён — без токена отдаётся моковый профиль.`);
+    console.log(`     В проде запускать с NODE_ENV=production.`);
+  }
   console.log(`================================================`);
 });
