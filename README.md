@@ -60,6 +60,7 @@ NODE_ENV= PUBLIC_URL=http://localhost:3101 ALLOW_MOCK_AUTH=1 npm start
 | [docs/FRONTEND-MAP.md](docs/FRONTEND-MAP.md) | как найти код в собранном бандле |
 | [docs/GAMEPLAY.md](docs/GAMEPLAY.md) | шансы, RTP, апгрейдер, баттлы, розыгрыши, честный бросок |
 | [docs/CATALOG.md](docs/CATALOG.md) | каталог предметов Steam: обход, редкости, цены |
+| [docs/ADMIN.md](docs/ADMIN.md) | разделы админки, фабрика CRUD, ловушки порядка роутов |
 | [docs/AUTH.md](docs/AUTH.md) | вход через Steam, настройка домена, nginx |
 | [docs/TROUBLESHOOTING.md](docs/TROUBLESHOOTING.md) | плейбуки по типовым багам |
 
