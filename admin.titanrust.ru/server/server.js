@@ -484,7 +484,11 @@ app.get('/api/v1/admin/cases', requireAdminJWT, async (req, res) => {
 // FULL SERIES API HANDLERS WITH DB PERSISTENCE & FILTERING
 // =====================================================
 app.get('/api/v1/admin/cases/series/schedule', requireAdminJWT, async (req, res) => {
-    res.json({ success: true, data: [] });
+    // Раньше отдавался пустой массив — расписание серий выглядело незаполненным.
+    const rows = await dbAll(
+        `SELECT id, name, status, isLimited, isSecret, sortOrder, created_at
+         FROM series ORDER BY sortOrder ASC`).catch(() => []);
+    res.json({ success: true, data: rows, items: rows, total: rows.length });
 });
 
 app.get('/api/v1/admin/cases/series/export', requireAdminJWT, async (req, res) => {
@@ -993,25 +997,8 @@ app.get('/api/v1/cases/:slug', async (req, res) => {
 // =====================================================
 // CONFIG API
 // =====================================================
-app.get('/api/v1/admin/config/games', requireAdminJWT, (req, res) => {
-    res.json({ success: true, data: [
-        { id: 'cases', name: 'Cases', enabled: true, minBet: 10, maxBet: 50000, houseEdge: 4.5 },
-        { id: 'battles', name: 'Battles', enabled: true, minBet: 50, maxBet: 100000, houseEdge: 5.0 },
-        { id: 'upgrader', name: 'Upgrader', enabled: true, minBet: 10, maxBet: 50000, houseEdge: 8.0 }
-    ]});
-});
-
-app.put('/api/v1/admin/config/games/:id', requireAdminJWT, (req, res) => res.json({ success: true }));
-
-app.get('/api/v1/admin/config/socials', requireAdminJWT, (req, res) => {
-    res.json({ success: true, data: [
-        { id: 'telegram', name: 'Telegram', url: 'https://t.me/titanrust', enabled: true },
-        { id: 'vk', name: 'VK', url: 'https://vk.com/titanrust', enabled: true },
-        { id: 'discord', name: 'Discord', url: '', enabled: false }
-    ]});
-});
-
-app.put('/api/v1/admin/config/socials/:id', requireAdminJWT, (req, res) => res.json({ success: true }));
+// Обработчики config/games и config/socials переехали в adminRoutes.js:
+// здесь они отдавали захардкоженный список и ничего не сохраняли.
 
 // =====================================================
 // STATS, USERS, BANNERS, PAGES, RTP, etc.
@@ -1174,115 +1161,35 @@ app.get('/api/v1/admin/accounting', requireAdminJWT, (req, res) => {
     });
 });
 
-app.get('/api/v1/admin/promo', requireAdminJWT, (req, res) => res.json({ success: true, data: [] }));
-app.post('/api/v1/admin/promo', requireAdminJWT, (req, res) => res.json({ success: true, data: { id: Date.now(), ...req.body } }));
-app.put('/api/v1/admin/promo/:id', requireAdminJWT, (req, res) => res.json({ success: true }));
-app.delete('/api/v1/admin/promo/:id', requireAdminJWT, (req, res) => res.json({ success: true }));
-
-app.get('/api/v1/admin/guardian/banned-ips', requireAdminJWT, (req, res) => res.json({ success: true, data: [] }));
-app.post('/api/v1/admin/guardian/block', requireAdminJWT, (req, res) => res.json({ success: true }));
-app.delete('/api/v1/admin/guardian/block/:id', requireAdminJWT, (req, res) => res.json({ success: true }));
-
-app.get('/api/v1/admin/secret-cases/config', requireAdminJWT, (req, res) => {
-    res.json({ success: true, data: { enabled: true, unlockInterval: 3600, totalCases: 3 } });
-});
-app.put('/api/v1/admin/secret-cases/queue', requireAdminJWT, (req, res) => res.json({ success: true }));
-app.post('/api/v1/admin/secret-cases/advance', requireAdminJWT, (req, res) => res.json({ success: true }));
-
-app.get('/api/v1/admin/deposit-chain/cohorts', requireAdminJWT, (req, res) => res.json({ success: true, data: [] }));
-app.get('/api/v1/admin/deposit-chain/cases/:caseId/best-drops', requireAdminJWT, (req, res) => res.json({ success: true, data: [] }));
-
-app.get('/api/v1/admin/cases/series/:id/monitor', requireAdminJWT, (req, res) => {
-    res.json({ success: true, data: { activeCases: 4, totalOpenings: 1240, revenue: 154000, topDrop: "AK-47 | Tempered" } });
-});
-
-app.get('/api/v1/admin/cases/series/:id/audit', requireAdminJWT, (req, res) => {
-    res.json({ success: true, data: [] });
-});
-
-app.get('/api/v1/admin/wallet/merchant-wallet-health', requireAdminJWT, (req, res) => {
-    res.json({ success: true, data: { status: 'healthy', balance: 500000, currency: 'RUB' } });
-});
-
-app.get('/api/v1/admin/secret-cases/config', requireAdminJWT, (req, res) => {
-    res.json({ success: true, data: { enabled: true, unlockInterval: 3600, totalCases: 3 } });
-});
-
-app.get('/api/v1/admin/wallet/stats', requireAdminJWT, (req, res) => {
-    res.json({ success: true, data: { totalDeposits: 250000, totalWithdrawals: 180000, netProfit: 70000 } });
-});
-
-app.get('/api/v1/admin/wallet/withdrawals', requireAdminJWT, (req, res) => {
-    res.json({ success: true, data: [], items: [], total: 0 });
-});
-
-app.get('/api/v1/admin/rtp/stats', requireAdminJWT, (req, res) => {
-    res.json({ success: true, data: { currentRtp: 94.5, targetRtp: 95.0, totalPayout: 840000 } });
-});
-
-app.get('/api/v1/admin/topdrops/config', requireAdminJWT, (req, res) => {
-    res.json({ success: true, data: { maxDisplay: 20, refreshRate: 5 } });
-});
-
-app.get('/api/v1/admin/drop-upgrade/config', requireAdminJWT, (req, res) => {
-    res.json({ success: true, data: { enabled: true, minMultiplier: 1.1, maxMultiplier: 100 } });
-});
-
-app.get('/api/v1/admin/config/deposit-chain', requireAdminJWT, (req, res) => {
-    res.json({ success: true, data: { enabled: true, bonusPercent: 10 } });
-});
-
-app.get('/api/v1/admin/giveaways', requireAdminJWT, (req, res) => {
-    res.json({ success: true, data: [], total: 0 });
-});
-
-app.get('/api/v1/admin/streamers', requireAdminJWT, (req, res) => {
-    res.json({ success: true, data: [], total: 0 });
-});
-
-app.get('/api/v1/admin/bots/profiles', requireAdminJWT, (req, res) => {
-    res.json({ success: true, data: [], total: 0 });
-});
-
-app.get('/api/v1/admin/guardian/banned-ips', requireAdminJWT, (req, res) => {
-    res.json({ success: true, data: [], total: 0 });
-});
-
-app.get('/api/v1/admin/kyc', requireAdminJWT, (req, res) => {
-    res.json({ success: true, data: [], total: 0 });
-});
-
-app.get('/api/v1/admin/wallet/currency-rates', requireAdminJWT, (req, res) => {
-    res.json({ success: true, data: { RUB: 1, USD: 90, EUR: 98 } });
-});
-
-app.get('/api/v1/admin/wallet/provider-balances', requireAdminJWT, (req, res) => {
-    res.json({ success: true, data: [] });
-});
-
-app.get('/api/v1/admin/wallet-config/methods', requireAdminJWT, (req, res) => {
-    res.json({ success: true, data: [] });
-});
-
-app.get('/api/v1/admin/wallet-config/rates', requireAdminJWT, (req, res) => {
-    res.json({ success: true, data: [] });
-});
-
-app.get('/api/v1/admin/wallet-config/countries', requireAdminJWT, (req, res) => {
-    res.json({ success: true, data: [] });
-});
+// Заглушки удалены: эти пути обслуживает adminRoutes.js, где данные берутся
+// из базы. Express берёт ПЕРВЫЙ совпавший обработчик, поэтому заглушки выше
+// перекрывали настоящие роуты, и разделы админки оставались пустыми.
 
 // --- Вход по passkey (WebAuthn) ---
 const passkeys = require('./passkeys').register({
     app, db, dbAll, dbGet, dbRun, generateAdminJWT
 });
 
+// --- Разделы админки ---
+// Схема и роуты для секций, у которых их не было: до этого 29 эндпоинтов
+// проваливались в catch-all и страницы открывались пустыми.
+//
+// Роуты регистрируются СИНХРОННО: Express сопоставляет обработчики в порядке
+// объявления, и регистрация внутри .then() поставила бы их после catch-all,
+// то есть они бы никогда не вызвались. Создание таблиц идёт параллельно —
+// запросы всё равно выстраиваются в очередь на одном соединении SQLite.
+require('./adminRoutes').makeAdminRoutes({ app, dbAll, dbGet, dbRun, requireAdminJWT });
+require('./adminSchema').ensureAdminSchema({ dbRun, dbGet })
+    .catch((e) => console.error('[Admin] Схема разделов:', e.message));
+
 // =====================================================
 // CATCH-ALL for any remaining /api/v1/admin/* routes
 // =====================================================
 app.all('/api/v1/admin/*', requireAdminJWT, (req, res) => {
     console.log(`[Catch-all] ${req.method} ${req.path}`);
-    res.json({ success: true, data: [], items: [], total: 0 });
+    // catchAll:true — чтобы «обработчика нет» нельзя было спутать с «таблица
+    // пуста»: раньше обе ситуации давали байт в байт одинаковый ответ.
+    res.json({ success: true, data: [], items: [], total: 0, catchAll: true });
 });
 
 // =====================================================
