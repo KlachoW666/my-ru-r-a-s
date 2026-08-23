@@ -256,6 +256,8 @@ async function getLiveSeries() {
           titleImage: s.titleImage || s.image || "/uploads/series/1786522945847-911377162.webp",
           sortOrder: s.sortOrder || s.position || 0,
           isActive: true,
+          isLimited: s.isLimited === 1,
+          isSecret: s.isSecret === 1,
           cases: sCases
         });
       }
@@ -620,13 +622,56 @@ app.get('/api/v1/cases/limited/remaining', (req, res) => {
   res.json({ status: "success", data: { remaining: 50, supplyTotal: 100 } });
 });
 
-app.get('/api/v1/cases/secret/state', (req, res) => {
-  res.json({ status: "success", data: { enabled: true, revealedCount: 3 } });
+app.get('/api/v1/cases/secret/state', async (req, res) => {
+  const secretSeries = await queryAdminDb(
+    `SELECT id, name FROM series WHERE isSecret = 1 AND status = 'active'`);
+  const slotsTotal = Number(process.env.SECRET_SLOTS || 24);
+  let revealedCount = 0;
+  if (secretSeries.length) {
+    const row = await queryAdminDb(
+      `SELECT COUNT(*) AS c FROM case_items ci
+        JOIN cases ca ON ca.id = ci.case_id
+        WHERE ca.seriesId IN (${secretSeries.map(() => '?').join(',')}) AND ca.archived = 0`,
+      secretSeries.map(x => x.id));
+    revealedCount = row.length ? Math.min(row[0].c, slotsTotal) : 0;
+  }
+  res.json({
+    status: "success",
+    data: {
+      enabled: secretSeries.length > 0,
+      seriesCount: secretSeries.length,
+      slotsTotal,
+      revealedCount
+    }
+  });
 });
 
+// Сетка секретного кейса.
+// Контракт снят с index-B3loti9-.js: data.slotsTotal и data.slots[].slotIndex,
+// revealedCount считается по открытым слотам. Раньше отдавался плоский список
+// всего каталога (5430 позиций), и сетка не строилась.
 app.get('/api/v1/cases/:slug/grid', async (req, res) => {
-  const skins = await getLiveItems();
-  res.json({ status: "success", data: skins });
+  const slug = req.params.slug;
+  const dbCases = await queryAdminDb(`SELECT * FROM cases WHERE slug = ? OR id = ?`, [slug, slug]);
+  const c = dbCases[0];
+  const items = await getCaseItemsFromDb(c ? c.id : null);
+  const slotsTotal = Number(process.env.SECRET_SLOTS || 24);
+
+  // Раскрыты только те слоты, под которыми реально лежит предмет из состава
+  // кейса. Остальные остаются закрытыми знаком вопроса.
+  const slots = items.slice(0, slotsTotal).map((it, idx) => ({
+    slotIndex: idx,
+    revealed: true,
+    item: {
+      id: it.id, name: it.name, image: fixImageUrl(it.image),
+      price: it.price, rarity: it.rarity, color: it.color
+    }
+  }));
+
+  res.json({
+    status: "success",
+    data: { slug, slotsTotal, revealedCount: slots.length, slots }
+  });
 });
 
 app.get('/api/v1/cases/:slug/best', async (req, res) => {
@@ -671,6 +716,11 @@ app.get('/api/v1/cases/:slug', async (req, res) => {
 
     const requestedSlug = slug || (c ? c.slug : "rust-starter");
 
+    const seriesRows = c && (c.seriesId || c.series_id)
+      ? await queryAdminDb(`SELECT isLimited, isSecret FROM series WHERE id = ?`, [c.seriesId || c.series_id])
+      : [];
+    const seriesFlags = seriesRows[0] || {};
+
     const caseObj = {
       id: requestedSlug,
       slug: requestedSlug,
@@ -682,8 +732,10 @@ app.get('/api/v1/cases/:slug', async (req, res) => {
       volatility: (c ? (c.volatility || "AVERAGE") : "AVERAGE").toUpperCase(),
       isActive: c ? (c.isActive === 1 || c.status === 'active' || c.isActive == null) : true,
       seriesId: c ? (c.seriesId || c.series_id || 1) : 1,
-      limited: c ? c.isLimited === 1 : false,
-      secret: c ? c.isSecret === 1 : false
+      // isLimited/isSecret хранятся на серии, а не на кейсе: в таблице cases
+      // таких колонок нет и обращение к ним всегда давало undefined.
+      limited: seriesFlags.isLimited === 1,
+      secret: seriesFlags.isSecret === 1
     };
 
     let items = await getCaseItemsFromDb(c ? c.id : null);

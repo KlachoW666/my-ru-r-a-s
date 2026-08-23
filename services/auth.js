@@ -36,6 +36,18 @@ const PUBLIC_URL = String(process.env.PUBLIC_URL || 'https://titanrust.ru').repl
 const STEAM_RETURN_URL = `${PUBLIC_URL}/api/v1/auth/steam/return`;
 
 const JWT_SECRET = process.env.JWT_SECRET || 'titanrust_super_secret_jwt_key_2026';
+
+// Небезопасный секрет по умолчанию. Если .env не подхватился на проде, сервер
+// поднялся бы молча на общеизвестном значении, и подделать токен смог бы любой,
+// кто видел репозиторий. Поэтому в production падаем сразу.
+const INSECURE_JWT_SECRETS = ['titanrust_super_secret_jwt_key_2026', '', 'secret', 'changeme'];
+if (process.env.NODE_ENV === 'production' && INSECURE_JWT_SECRETS.includes(JWT_SECRET)) {
+  console.error('[FATAL] JWT_SECRET не задан или оставлен значением по умолчанию.');
+  console.error('        Сгенерируйте: node -e "console.log(require(\'crypto\').randomBytes(48).toString(\'hex\'))"');
+  console.error('        и пропишите в .env, иначе токены можно подделать.');
+  process.exit(1);
+}
+
 const ACCESS_TTL = Number(process.env.ACCESS_TOKEN_TTL || 60 * 60);            // 1 час
 const REFRESH_TTL = Number(process.env.REFRESH_TOKEN_TTL || 30 * 24 * 60 * 60); // 30 дней
 const REFRESH_COOKIE = 'kaban_rt';

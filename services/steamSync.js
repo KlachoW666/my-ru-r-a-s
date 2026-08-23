@@ -6,7 +6,12 @@ const sqlite3 = require('sqlite3').verbose();
 
 // Ключ Steam Web API. В проде задавать через переменную окружения STEAM_API_KEY —
 // значение ниже лежит в репозитории открытым текстом и подлежит ротации.
-const STEAM_API_KEY = process.env.STEAM_API_KEY || 'F08021AF0F2223EBD08820781CBC2B2D';
+// Ключ только из окружения. Раньше здесь лежало боевое значение открытым
+// текстом: оно попало в историю git и подлежит перевыпуску.
+const STEAM_API_KEY = process.env.STEAM_API_KEY || '';
+if (!STEAM_API_KEY) {
+  console.warn('[SteamSync] STEAM_API_KEY не задан — ник и аватар из Steam подтягиваться не будут.');
+}
 const RUST_APP_ID = 252490;
 const STEAM_IMAGE_BASE = "https://community.cloudflare.steamstatic.com/economy/image/";
 const DATA_DIR = path.resolve(__dirname, '../data');

@@ -13,6 +13,18 @@ const app = express();
 const PORT = process.env.ADMIN_PORT || 8080;
 const JWT_SECRET = process.env.JWT_SECRET || 'titanrust_super_secret_jwt_key_2026';
 
+// Небезопасный секрет по умолчанию. Если .env не подхватился на проде, сервер
+// поднялся бы молча на общеизвестном значении, и подделать токен смог бы любой,
+// кто видел репозиторий. Поэтому в production падаем сразу.
+const INSECURE_JWT_SECRETS = ['titanrust_super_secret_jwt_key_2026', '', 'secret', 'changeme'];
+if (process.env.NODE_ENV === 'production' && INSECURE_JWT_SECRETS.includes(JWT_SECRET)) {
+  console.error('[FATAL] JWT_SECRET не задан или оставлен значением по умолчанию.');
+  console.error('        Сгенерируйте: node -e "console.log(require(\'crypto\').randomBytes(48).toString(\'hex\'))"');
+  console.error('        и пропишите в .env, иначе токены можно подделать.');
+  process.exit(1);
+}
+
+
 const DB_PATH = path.join(__dirname, 'database.sqlite');
 const PUBLIC_DIR = path.join(__dirname, '..', 'public');
 
@@ -247,17 +259,30 @@ function fetchSteamMarketBatch(start = 0, count = 100) {
 // =====================================================
 // AUTH API  (paths that admin frontend expects)
 // =====================================================
-app.post('/api/v1/admin/auth/login/options', (req, res) => {
-    const token = generateAdminJWT({ id: 1, username: 'SUPER_ADMIN', role: 'SUPER_ADMIN' });
-    res.json({ success: true, token, accessToken: token, data: { accessToken: token, user: { userId: 1, username: 'SUPER_ADMIN', role: 'SUPER_ADMIN' } } });
-});
+// Настоящий WebAuthn живёт в passkeys.js и регистрируется ниже.
+// Прежняя заглушка выдавала JWT любому, кто просто дёрнул этот путь.
 
 app.post('/api/v1/admin/auth/login', (req, res) => {
+    if (REQUIRE_ADMIN_AUTH) {
+        return res.status(410).json({ success: false, message: 'Вход только по passkey: /auth/login/options' });
+    }
     const token = generateAdminJWT({ id: 1, username: 'SUPER_ADMIN', role: 'SUPER_ADMIN', email: 'admin@titanrust.ru' });
     res.json({ success: true, token, accessToken: token, data: { accessToken: token, user: { userId: 1, username: 'SUPER_ADMIN', role: 'SUPER_ADMIN' } }, user: { id: 1, username: 'SUPER_ADMIN', role: 'SUPER_ADMIN' } });
 });
 
 app.get('/api/v1/admin/auth/refresh', (req, res) => {
+    // При включённой защите продлеваем сессию только по действующему токену.
+    if (REQUIRE_ADMIN_AUTH) {
+        const header = req.headers.authorization || '';
+        const t = header.startsWith('Bearer ') ? header.slice(7) : null;
+        try {
+            const payload = jwt.verify(t, JWT_SECRET);
+            const token = generateAdminJWT({ id: payload.userId, username: payload.username, role: payload.role, email: payload.email });
+            return res.json({ success: true, data: { accessToken: token, user: payload } });
+        } catch {
+            return res.status(401).json({ success: false, message: 'Сессия истекла, войдите по passkey' });
+        }
+    }
     const token = generateAdminJWT({ id: 1, username: 'SUPER_ADMIN', role: 'SUPER_ADMIN' });
     res.json({ success: true, data: { accessToken: token, user: { userId: 1, username: 'SUPER_ADMIN', role: 'SUPER_ADMIN' } } });
 });
@@ -1247,6 +1272,11 @@ app.get('/api/v1/admin/wallet-config/countries', requireAdminJWT, (req, res) => 
     res.json({ success: true, data: [] });
 });
 
+// --- Вход по passkey (WebAuthn) ---
+const passkeys = require('./passkeys').register({
+    app, db, dbAll, dbGet, dbRun, generateAdminJWT
+});
+
 // =====================================================
 // CATCH-ALL for any remaining /api/v1/admin/* routes
 // =====================================================
@@ -1274,4 +1304,15 @@ app.listen(PORT, () => {
     console.log(`🌐 http://localhost:${PORT}`);
     console.log(`💾 ${DB_PATH}`);
     console.log(`====================================================`);
+    passkeys.credentialCount().then((n) => {
+        if (REQUIRE_ADMIN_AUTH && n === 0) {
+            console.warn('[!] ADMIN_REQUIRE_AUTH=1, но ни одного passkey не зарегистрировано.');
+            console.warn('    Войти будет нельзя. Зарегистрируйте ключ или временно поставьте 0.');
+        } else if (!REQUIRE_ADMIN_AUTH) {
+            console.warn('[!] ADMIN_REQUIRE_AUTH=0 — админка пропускает ЛЮБОЙ запрос без токена.');
+            console.warn(`    Ключей зарегистрировано: ${n}. Перед публикацией поставьте 1.`);
+        } else {
+            console.log(`Passkey: защита включена, ключей зарегистрировано ${n}`);
+        }
+    }).catch(() => {});
 });
