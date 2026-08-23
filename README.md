@@ -58,6 +58,7 @@ NODE_ENV= PUBLIC_URL=http://localhost:3101 ALLOW_MOCK_AUTH=1 npm start
 | [docs/DATA-MODEL.md](docs/DATA-MODEL.md) | схема SQLite, редкости, картинки предметов |
 | [docs/DESIGN-SYSTEM.md](docs/DESIGN-SYSTEM.md) | токены, палитра, типографика, правила правок UI |
 | [docs/FRONTEND-MAP.md](docs/FRONTEND-MAP.md) | как найти код в собранном бандле |
+| [docs/GAMEPLAY.md](docs/GAMEPLAY.md) | шансы, RTP, апгрейдер, баттлы, розыгрыши, честный бросок |
 | [docs/CATALOG.md](docs/CATALOG.md) | каталог предметов Steam: обход, редкости, цены |
 | [docs/AUTH.md](docs/AUTH.md) | вход через Steam, настройка домена, nginx |
 | [docs/TROUBLESHOOTING.md](docs/TROUBLESHOOTING.md) | плейбуки по типовым багам |
@@ -76,9 +77,9 @@ NODE_ENV= PUBLIC_URL=http://localhost:3101 ALLOW_MOCK_AUTH=1 npm start
 
 ## Пока не реализовано
 
-- Кейс-баттлы и розыгрыши — моки в памяти процесса.
+- Инвентарь: выигранные предметы зачисляются деньгами, вывод через Steam trade-link не сделан.
+- Предварительная фиксация серверного сида (раунды не хранятся).
 - Гонки — раздела нет в собранном фронте, нужна более новая сборка.
-- Почтовый сервер: коды подтверждения печатаются в лог, не отправляются письмом.
 
 
 Подробности и текущий статус — в [docs/AUTH.md](docs/AUTH.md) и [docs/TROUBLESHOOTING.md](docs/TROUBLESHOOTING.md).
