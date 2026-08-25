@@ -38,6 +38,20 @@ const ORIGINS = String(process.env.ADMIN_ORIGINS ||
 
 const INVITE_CODE = process.env.ADMIN_INVITE_CODE || '';
 
+/**
+ * Какой аутентификатор просить у браузера.
+ *
+ *   platform       — только встроенный: Windows Hello, Touch ID, Face ID.
+ *   cross-platform — только внешний: USB-брелок FIDO2, телефон по QR.
+ *   пусто (по умолчанию) — решает операционная система.
+ *
+ * По умолчанию не указываем ничего: так остаются доступны все способы.
+ * Но Windows в этом случае предлагает USB-ключ, если Windows Hello на учётной
+ * записи не настроен, — других вариантов у неё нет. Тогда либо настроить Hello,
+ * либо поставить platform и получить прямой переход к нему.
+ */
+const ATTACHMENT = String(process.env.ADMIN_PASSKEY_ATTACHMENT || '').trim();
+
 /** Челленджи живут в памяти: они одноразовые и короткоживущие. */
 const challenges = new Map();
 const CHALLENGE_TTL = 5 * 60 * 1000;
@@ -210,7 +224,11 @@ function register({ app, db, dbAll, dbGet, dbRun, generateAdminJWT }) {
         userDisplayName: admin.username || 'SUPER_ADMIN',
         attestationType: 'none',
         excludeCredentials: existing.map(c => ({ id: c.credential_id, transports: c.transports ? JSON.parse(c.transports) : undefined })),
-        authenticatorSelection: { residentKey: 'preferred', userVerification: 'preferred' }
+        authenticatorSelection: {
+          residentKey: 'preferred',
+          userVerification: 'preferred',
+          ...(ATTACHMENT ? { authenticatorAttachment: ATTACHMENT } : {})
+        }
       });
 
       const challengeId = putChallenge(options.challenge, {
