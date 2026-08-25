@@ -147,7 +147,11 @@ const PORT = process.env.PORT || 3101;
 // Path to public static directory
 const PUBLIC_DIR = path.resolve(__dirname, 'public');
 
-// За nginx/Cloudflare: без этого req.protocol всегда 'http' и Secure-cookie не ставится.
+// За nginx/Cloudflare: без этого req.ip — адрес прокси, а не посетителя,
+// и req.protocol всегда 'http'.
+//
+// На флаг Secure у refresh-cookie это НЕ влияет: он берётся из NODE_ENV
+// (см. cookieOptions в services/auth.js), а не из X-Forwarded-Proto.
 app.set('trust proxy', 1);
 
 // origin:true отражает Origin запроса вместо '*' — обязательно, потому что
