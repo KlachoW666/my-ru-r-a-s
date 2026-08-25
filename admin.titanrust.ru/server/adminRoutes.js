@@ -230,6 +230,20 @@ function makeAdminRoutes({ app, dbAll, dbGet, dbRun, requireAdminJWT }) {
   app.get('/api/v1/admin/admins/roles', requireAdminJWT, (req, res) =>
     ok(res, access.roleCatalog()));
 
+  // Выписанные приглашения — чтобы видеть, кто ещё не завёл ключ.
+  app.get('/api/v1/admin/admins/invites', requireAdminJWT, async (req, res) => {
+    const rows = await dbAll(
+      `SELECT id, target_role, username, created_by, created_at, expires_at, used_at
+         FROM admin_invites ORDER BY id DESC LIMIT 100`).catch(() => []);
+    // Сам токен не отдаём: он пропуск, и светить его в списке незачем.
+    ok(res, rows.map(r => ({
+      ...r,
+      status: r.used_at ? 'использовано'
+        : (r.expires_at && Date.parse(r.expires_at) < Date.now() ? 'истекло' : 'ждёт')
+    })));
+  });
+
+
   app.get('/api/v1/admin/admins/:id', requireAdminJWT, async (req, res) => {
     const row = await dbGet(`SELECT * FROM admin_users WHERE id = ?`, [req.params.id]);
     if (!row) return bad(res, 'Администратор не найден', 404);
@@ -256,6 +270,41 @@ function makeAdminRoutes({ app, dbAll, dbGet, dbRun, requireAdminJWT }) {
     } catch (e) {
       bad(res, /UNIQUE/.test(e.message) ? 'Такой логин или e-mail уже заведён' : e.message, 400);
     }
+  });
+
+  // Пригласить нового администратора. Домен `admins` — значит только владелец.
+  app.post('/api/v1/admin/admins/invite', requireAdminJWT, async (req, res) => {
+    try {
+      const body = req.body || {};
+      const role = String(body.role || 'VIEWER').toUpperCase();
+      if (!access.ROLE_NAMES.includes(role)) {
+        return bad(res, `Неизвестная роль. Допустимые: ${access.ROLE_NAMES.join(', ')}`);
+      }
+      const hours = Math.min(Math.max(Number(body.hours) || 24, 1), 24 * 14);
+      const username = body.username ? String(body.username).trim() : null;
+
+      const token = crypto.randomBytes(32).toString('base64url');
+      const expiresAt = new Date(Date.now() + hours * 3600 * 1000).toISOString();
+
+      let adminUserId = null;
+      if (username) {
+        const existing = await dbGet(`SELECT id FROM admin_users WHERE username = ?`, [username]).catch(() => null);
+        if (existing) adminUserId = existing.id;
+      }
+
+      await dbRun(
+        `INSERT INTO admin_invites (token, target_role, username, created_by, expires_at, admin_user_id)
+         VALUES (?, ?, ?, ?, ?, ?)`,
+        [token, role, username, req.user?.username || 'SUPER_ADMIN', expiresAt, adminUserId]);
+
+      const base = String(body.baseUrl || process.env.ADMIN_ORIGINS || '')
+        .split(',').map(x => x.trim()).find(x => x.startsWith('http')) || '';
+      console.log(`[Права] ${req.user?.username} выписал приглашение на роль ${role}`);
+      ok(res, {
+        token, role, username, expiresAt,
+        link: base ? `${base.replace(/\/+$/, '')}/register?token=${token}` : `/register?token=${token}`
+      });
+    } catch (e) { bad(res, e.message, 500); }
   });
 
   const updateAdmin = async (req, res) => {

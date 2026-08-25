@@ -50,21 +50,59 @@ sudo cp /var/www/titanrust/deploy/nginx/*.conf /etc/nginx/sites-available/ && su
 sudo certbot --nginx -d titanrust.ru -d www.titanrust.ru -d admin.titanrust.ru && sudo nginx -t && sudo systemctl reload nginx
 ```
 
-## Закрыть админку
+## Завести владельца и закрыть админку
 
-Сразу после первого запуска, **до** того как домен станет доступен снаружи. Пока `ADMIN_REQUIRE_AUTH=0`, админка пускает любой запрос без токена.
+Сразу после первого запуска, **до** того как домен станет доступен снаружи: пока `ADMIN_REQUIRE_AUTH=0`, админка пускает любой запрос без токена.
 
-1. Открыть `https://admin.titanrust.ru/login.html`, зарегистрировать passkey. Первый ключ заводится без приглашения.
-2. Убедиться, что ключ записался:
+Экран `/register` не показывает форму без токена в адресе, а первое приглашение владельцу выдать некому — администраторов ещё нет. Поэтому первый токен создаётся из консоли:
+
+```bash
+cd /var/www/titanrust && node deploy/make-invite.js --role SUPER_ADMIN
+```
+
+Скрипт напечатает ссылку вида `https://admin.titanrust.ru/register?token=…`. Откройте её **в том браузере, где будет храниться ключ**, введите название ключа («MacBook Touch ID», «Ключ Klacho») и подтвердите отпечатком, лицом или PIN.
+
+Токен одноразовый, живёт сутки и гаснет, как только по нему завели ключ. Прерванная регистрация его не сжигает — можно повторить.
+
+Проверить, что ключ записался:
 
 ```bash
 curl -s https://admin.titanrust.ru/api/v1/admin/auth/passkeys
 ```
 
-3. В `.env` поставить `ADMIN_REQUIRE_AUTH=1` и задать `ADMIN_INVITE_CODE` для следующих ключей.
-4. `sudo systemctl restart titanrust-admin`
+Должно быть `count: 1`, а рядом — `username` и `role` владельца. После этого закрываем вход:
 
-Первый ключ получает роль владельца. Остальных заводят в разделе «Администраторы», после чего человек регистрирует свой ключ с кодом приглашения и своим логином. Роли описаны в [../docs/ADMIN.md](../docs/ADMIN.md#права-доступа).
+```bash
+cd /var/www/titanrust && sed -i "s/^ADMIN_REQUIRE_AUTH=.*/ADMIN_REQUIRE_AUTH=1/" .env && pm2 restart admin-panel --update-env
+```
+
+Теперь `/api/v1/admin/*` без токена отвечает 401, а вход — только по ключу.
+
+### Остальные администраторы
+
+Владелец приглашает их из админки, ролью и сроком:
+
+```bash
+curl -s -X POST https://admin.titanrust.ru/api/v1/admin/admins/invite -H "Authorization: Bearer $TOKEN" -H "Content-Type: application/json" -d '{"role":"MODERATOR","username":"Ivan","hours":24}'
+```
+
+В ответе придёт готовая ссылка. Роли и их права описаны в [../docs/ADMIN.md](../docs/ADMIN.md#права-доступа): `SUPER_ADMIN` может всё, `ADMIN` — всё кроме управления администраторами, `FINANCE` — деньги и RTP, `MODERATOR` — игроки и контент, `VIEWER` — только чтение.
+
+Кто ещё не завёл ключ, видно здесь:
+
+```bash
+curl -s https://admin.titanrust.ru/api/v1/admin/admins/invites -H "Authorization: Bearer $TOKEN"
+```
+
+### Если что-то не так
+
+| Симптом | Причина |
+|---|---|
+| `Request failed with status code 409` на кнопке входа | ни одного ключа не заведено — это ожидаемо до первой регистрации |
+| «Ссылка без токена приглашения» | открыли `/register` без `?token=…` |
+| «Приглашение недействительно или истекло» | токен уже использован, просрочен или скопирован не целиком |
+| Браузер не предлагает создать ключ | `ADMIN_RP_ID` не совпадает с доменом в адресной строке; для `admin.titanrust.ru` подходит `titanrust.ru` |
+| Ключ создан, но вход не проходит | домен открыт не по HTTPS: WebAuthn работает только в защищённом контексте |
 
 ## Если сервер уже развёрнут со старого коммита
 
