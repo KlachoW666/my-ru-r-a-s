@@ -26,7 +26,37 @@ set -Eeuo pipefail
 # ---------------------------------------------------------------------------
 
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
-APP_DIR="$(cd "$SCRIPT_DIR/.." && pwd)"
+
+# Корень проекта ИЩЕМ, а не отсчитываем от места скрипта.
+#
+# Раньше здесь было "$SCRIPT_DIR/..", то есть «на уровень выше себя». Это верно,
+# только пока файл лежит ровно в deploy/. Стоит скопировать его в корень проекта
+# — и корнем становится /var/www, а из домашнего каталога и вовсе /. Скрипт
+# честно докладывал «каталог: /var/www» и падал с «не git-репозиторий».
+#
+# git сам знает, где корень его рабочего дерева, поэтому спрашиваем у него.
+APP_DIR="$(cd "$SCRIPT_DIR" 2>/dev/null && git rev-parse --show-toplevel 2>/dev/null || true)"
+
+if [ -z "$APP_DIR" ]; then
+  # Не репозиторий или git недоступен — опознаём корень по package.json.
+  if   [ -f "$SCRIPT_DIR/package.json" ];    then APP_DIR="$SCRIPT_DIR"
+  elif [ -f "$SCRIPT_DIR/../package.json" ]; then APP_DIR="$(cd "$SCRIPT_DIR/.." && pwd)"
+  else APP_DIR="$SCRIPT_DIR"
+  fi
+fi
+
+# И убеждаемся, что попали именно в этот проект, а не в случайный каталог:
+# дальше будет git reset --hard, ошибиться адресом тут нельзя.
+if [ ! -f "$APP_DIR/server.js" ] || [ ! -d "$APP_DIR/admin.titanrust.ru" ]; then
+  printf '
+Ошибка: %s не похож на корень проекта — нет server.js или admin.titanrust.ru.
+' "$APP_DIR" >&2
+  printf 'Запускайте скрипт из дерева проекта, например:
+' >&2
+  printf '    cd /var/www/titanrust && ./deploy/update.sh
+' >&2
+  exit 1
+fi
 
 # Значения по умолчанию. Любое переопределяется в deploy.conf или переменной
 # окружения: BRANCH=dev ./deploy/update.sh
@@ -39,7 +69,12 @@ KEEP_BACKUPS="${KEEP_BACKUPS:-10}"
 HEALTH_RETRIES="${HEALTH_RETRIES:-20}"
 HEALTH_DELAY="${HEALTH_DELAY:-1}"
 
-[ -f "$SCRIPT_DIR/deploy.conf" ] && . "$SCRIPT_DIR/deploy.conf"
+# Настройки ищем и рядом со скриптом, и в deploy/ корня проекта: файл могли
+# скопировать в корень, а deploy.conf при этом остался на своём месте.
+for conf in "$SCRIPT_DIR/deploy.conf" "$APP_DIR/deploy/deploy.conf"; do
+  [ -f "$conf" ] && { . "$conf"; break; }
+done
+unset conf
 
 DRY_RUN=0
 DO_RESTART=1
