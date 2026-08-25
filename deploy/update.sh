@@ -115,10 +115,18 @@ fi
 # 2. Как перезапускать сервисы
 # ---------------------------------------------------------------------------
 
+# sudo нужен только если мы не root. На части серверов sudo к тому же сломан
+# («error initializing audit plugin sudoers_audit»), а под root он и не нужен.
+SUDO=""
+if [ "$(id -u)" -ne 0 ] && command -v sudo >/dev/null 2>&1; then
+  SUDO="sudo"
+fi
+
 RESTART_KIND="none"
 if command -v systemctl >/dev/null 2>&1 && systemctl list-unit-files 2>/dev/null | grep -q "^${SITE_SERVICE}\.service"; then
   RESTART_KIND="systemd"
-elif command -v pm2 >/dev/null 2>&1 && pm2 pid "$SITE_SERVICE" >/dev/null 2>&1; then
+elif command -v pm2 >/dev/null 2>&1 && pm2 describe "$SITE_SERVICE" >/dev/null 2>&1; then
+  # describe, а не pid: pid отвечает успехом и для несуществующего имени.
   RESTART_KIND="pm2"
 fi
 
@@ -127,10 +135,17 @@ if [ "$DO_RESTART" = 1 ]; then
     systemd) info "перезапуск через systemd: $SITE_SERVICE, $ADMIN_SERVICE" ;;
     pm2)     info "перезапуск через pm2: $SITE_SERVICE, $ADMIN_SERVICE" ;;
     none)
-      warn "ни systemd-юнита «$SITE_SERVICE», ни процесса pm2 с таким именем не нашлось."
+      warn "ни systemd-юнита «$SITE_SERVICE», ни процесса pm2 с именем «$SITE_SERVICE» не нашлось."
       warn "Код обновлю, но перезапускать будет нечего — сделайте это руками."
-      warn "Готовые юниты лежат в deploy/systemd/, ставятся так:"
-      warn "  sudo cp deploy/systemd/*.service /etc/systemd/system/ && sudo systemctl daemon-reload"
+      if command -v pm2 >/dev/null 2>&1; then
+        warn "pm2 установлен, но процессы называются иначе. Посмотрите «pm2 list» и"
+        warn "пропишите настоящие имена в deploy/deploy.conf, например:"
+        warn "  SITE_SERVICE=main-site"
+        warn "  ADMIN_SERVICE=admin-panel"
+      else
+        warn "Готовые юниты лежат в deploy/systemd/, ставятся так:"
+        warn "  cp deploy/systemd/*.service /etc/systemd/system/ && systemctl daemon-reload"
+      fi
       DO_RESTART=0
       ;;
   esac
@@ -207,10 +222,12 @@ run git reset --hard "$REMOTE/$BRANCH"
 svc() {
   local action="$1" name="$2"
   case "$RESTART_KIND" in
-    systemd) run sudo systemctl "$action" "$name" ;;
+    systemd) run ${SUDO:+$SUDO} systemctl "$action" "$name" ;;
     pm2)     case "$action" in
                stop)    run pm2 stop "$name" ;;
-               start|restart) run pm2 restart "$name" ;;
+               # --update-env: без него pm2 оставляет процессу переменные
+               # окружения от прошлого запуска, включая старый NODE_ENV.
+               start|restart) run pm2 restart "$name" --update-env ;;
              esac ;;
   esac
 }

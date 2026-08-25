@@ -6,7 +6,11 @@
 BRANCH=main
 REMOTE=origin
 
-# Имена сервисов. Для systemd — без .service, для pm2 — имя процесса.
+# Имена сервисов. Для systemd — без .service, для pm2 — имя процесса
+# ровно как в «pm2 list». Если разворачивали не с нуля, они у вас скорее
+# всего такие:
+#   SITE_SERVICE=main-site
+#   ADMIN_SERVICE=admin-panel
 SITE_SERVICE=titanrust
 ADMIN_SERVICE=titanrust-admin
 

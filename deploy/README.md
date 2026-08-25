@@ -66,7 +66,25 @@ curl -s https://admin.titanrust.ru/api/v1/admin/auth/passkeys
 
 Первый ключ получает роль владельца. Остальных заводят в разделе «Администраторы», после чего человек регистрирует свой ключ с кодом приглашения и своим логином. Роли описаны в [../docs/ADMIN.md](../docs/ADMIN.md#права-доступа).
 
+## Если сервер уже развёрнут со старого коммита
+
+Разово, до первого обычного обновления:
+
+```bash
+cd /var/www/titanrust && bash deploy/first-update.sh
+```
+
+В первом коммите в git лежали `node_modules` и `database.sqlite`. Потом их из индекса убрали, а на сервере `npm install` успел пересобрать нативные модули — и `git pull` встаёт с «Your local changes would be overwritten by merge», перечисляя полсотни файлов `node_modules`. Обычный `update.sh` такой узел не развяжет: он намеренно отказывается работать, когда в дереве есть расхождения.
+
+`first-update.sh` снимает копию базы, переводит дерево на `origin/main` жёстко, возвращает базу на место и ставит зависимости заново. Запускается один раз.
+
 ## Обновление
+
+```bash
+cd /var/www/titanrust && ./deploy/update.sh
+```
+
+Под своим пользователем, если он заведён:
 
 ```bash
 cd /var/www/titanrust && sudo -u titanrust ./deploy/update.sh
@@ -80,7 +98,11 @@ cd /var/www/titanrust && sudo -u titanrust ./deploy/update.sh
 cd /var/www/titanrust && ./deploy/update.sh --dry-run
 ```
 
-Настройки под конкретную машину — в `deploy/deploy.conf` (образец рядом, в git не попадает).
+Настройки под конкретную машину — в `deploy/deploy.conf` (образец рядом, в git не попадает). Скрипт сам находит systemd или pm2, но имена процессов должен знать: посмотрите `pm2 list` и пропишите их.
+
+```bash
+cp deploy/deploy.conf.example deploy/deploy.conf && nano deploy/deploy.conf
+```
 
 ## Что скрипт намеренно не делает
 
