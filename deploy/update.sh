@@ -239,13 +239,19 @@ fi
 # затирать нельзя.
 DIRTY="$(git status --porcelain --untracked-files=no | awk '{ $1=""; sub(/^ +/, ""); print }')"
 if [ -n "$DIRTY" ]; then
-  # Отбрасываем всё, что в целевом коммите игнорируется или просто отсутствует.
+  # Отсеиваем то, где терять нечего:
+  #   1. node_modules и файл базы — наследие прежнего устройства репозитория;
+  #   2. файлы, которые уже совпадают с целевым коммитом. Так выглядит
+  #      `git checkout origin/main -- deploy/`, которым скрипт достают на
+  #      сервер в первый раз: содержимое ровно то, к которому мы идём,
+  #      расхождение чисто индексное.
   REAL_DIRTY=""
   while IFS= read -r f; do
     [ -z "$f" ] && continue
     case "$f" in
       *node_modules/*|*.sqlite) continue ;;
     esac
+    if git diff --quiet "$TARGET" -- "$f" 2>/dev/null; then continue; fi
     REAL_DIRTY="$REAL_DIRTY$f"$'
 '
   done <<EOF_DIRTY
@@ -260,8 +266,8 @@ EOF_DIRTY
 
   COUNT="$(printf '%s
 ' "$DIRTY" | grep -c . || true)"
-  info "в дереве $COUNT изменённых отслеживаемых файлов — все в node_modules или база"
-  info "в новом коммите этих путей нет, поэтому расхождение просто снимается"
+  info "в дереве $COUNT изменённых отслеживаемых файлов, и ни одного в исходниках"
+  info "это node_modules, база или уже совпадающее с целью — расхождение снимается"
 fi
 
 # reset --hard, а не pull: на сервере правок быть не должно, а merge-конфликт
