@@ -13,6 +13,7 @@
  */
 
 const crypto = require('crypto');
+const access = require('./adminAccess');
 
 function makeAdminRoutes({ app, dbAll, dbGet, dbRun, requireAdminJWT }) {
   const ok = (res, data, extra = {}) => res.json({ success: true, data, items: Array.isArray(data) ? data : undefined, ...extra });
@@ -183,6 +184,145 @@ function makeAdminRoutes({ app, dbAll, dbGet, dbRun, requireAdminJWT }) {
       res.json({ success: true, deleted: req.params.id });
     });
   }
+
+  // ===========================================================================
+  // АДМИНИСТРАТОРЫ И РОЛИ
+  // ===========================================================================
+  //
+  // Раздел закрыт ролевой моделью: домен `admins` доступен на запись только
+  // владельцу (SUPER_ADMIN), администратору — на чтение, остальным — никак.
+  // Проверка стоит в requireAdminJWT, здесь остаются только смысловые запреты:
+  // не остаться без единого владельца и не разжаловать самого себя.
+
+  const adminView = (r) => r && ({
+    id: r.id,
+    username: r.username,
+    email: r.email,
+    role: access.normalizeRole(r.role),
+    roleTitle: access.ROLES[access.normalizeRole(r.role)].title,
+    created_at: r.created_at
+    // password намеренно не отдаём: колонка осталась от прежнего входа,
+    // сейчас вход только по passkey.
+  });
+
+  async function passkeyCounts() {
+    const rows = await dbAll(
+      `SELECT admin_user_id AS id, COUNT(*) AS c FROM admin_credentials GROUP BY admin_user_id`
+    ).catch(() => []);
+    return new Map(rows.map(r => [r.id, r.c]));
+  }
+
+  async function superAdminCount(exceptId = null) {
+    const rows = await dbAll(`SELECT id, role FROM admin_users`).catch(() => []);
+    return rows.filter(r => access.normalizeRole(r.role) === 'SUPER_ADMIN' && r.id !== exceptId).length;
+  }
+
+  app.get('/api/v1/admin/admins', requireAdminJWT, async (req, res) => {
+    try {
+      const rows = await dbAll(`SELECT * FROM admin_users ORDER BY id ASC`);
+      const keys = await passkeyCounts();
+      const data = rows.map(r => ({ ...adminView(r), passkeys: keys.get(r.id) || 0 }));
+      res.json({ success: true, data, items: data, total: data.length, roles: access.roleCatalog() });
+    } catch (e) { bad(res, e.message, 500); }
+  });
+
+  // Литеральный путь — строго до /admins/:id, иначе Express примет "roles" за id.
+  app.get('/api/v1/admin/admins/roles', requireAdminJWT, (req, res) =>
+    ok(res, access.roleCatalog()));
+
+  app.get('/api/v1/admin/admins/:id', requireAdminJWT, async (req, res) => {
+    const row = await dbGet(`SELECT * FROM admin_users WHERE id = ?`, [req.params.id]);
+    if (!row) return bad(res, 'Администратор не найден', 404);
+    const keys = await passkeyCounts();
+    ok(res, { ...adminView(row), passkeys: keys.get(row.id) || 0 });
+  });
+
+  app.post('/api/v1/admin/admins', requireAdminJWT, async (req, res) => {
+    try {
+      const body = req.body || {};
+      const username = String(body.username || '').trim();
+      if (!username) return bad(res, 'Не указан логин');
+      if (body.role && !access.ROLE_NAMES.includes(String(body.role).toUpperCase())) {
+        return bad(res, `Неизвестная роль. Допустимые: ${access.ROLE_NAMES.join(', ')}`);
+      }
+      const role = access.normalizeRole(body.role || 'VIEWER');
+      const r = await dbRun(`INSERT INTO admin_users (username, email, role) VALUES (?, ?, ?)`,
+        [username, body.email || null, role]);
+      const row = await dbGet(`SELECT * FROM admin_users WHERE id = ?`, [r.lastID]);
+      console.log(`[Права] Заведён администратор ${username} с ролью ${role}`);
+      // Ключ он заводит сам: POST /auth/register/options с ADMIN_INVITE_CODE
+      // и своим логином — тогда passkey привяжется именно к этой строке.
+      ok(res, { ...adminView(row), passkeys: 0 });
+    } catch (e) {
+      bad(res, /UNIQUE/.test(e.message) ? 'Такой логин или e-mail уже заведён' : e.message, 400);
+    }
+  });
+
+  const updateAdmin = async (req, res) => {
+    try {
+      const id = parseInt(req.params.id, 10);
+      const row = await dbGet(`SELECT * FROM admin_users WHERE id = ?`, [id]);
+      if (!row) return bad(res, 'Администратор не найден', 404);
+
+      const body = req.body || {};
+      const patch = {};
+      if (body.username !== undefined) patch.username = String(body.username).trim();
+      if (body.email !== undefined) patch.email = body.email || null;
+
+      if (body.role !== undefined) {
+        if (!access.ROLE_NAMES.includes(String(body.role).toUpperCase())) {
+          return bad(res, `Неизвестная роль. Допустимые: ${access.ROLE_NAMES.join(', ')}`);
+        }
+        const nextRole = access.normalizeRole(body.role);
+        const wasSuper = access.normalizeRole(row.role) === 'SUPER_ADMIN';
+
+        // Себя разжаловать нельзя: иначе достаточно одного неверного клика,
+        // чтобы вылететь из раздела, где эту роль можно вернуть.
+        if (wasSuper && nextRole !== 'SUPER_ADMIN' && String(req.user?.userId) === String(id)) {
+          return bad(res, 'Нельзя снять роль владельца с самого себя', 409);
+        }
+        // И последнего владельца тоже: админка осталась бы без управления.
+        if (wasSuper && nextRole !== 'SUPER_ADMIN' && (await superAdminCount(id)) === 0) {
+          return bad(res, 'Это последний владелец — сначала назначьте другого', 409);
+        }
+        patch.role = nextRole;
+      }
+
+      const cols = Object.keys(patch);
+      if (!cols.length) return bad(res, 'Нечего обновлять');
+      await dbRun(`UPDATE admin_users SET ${cols.map(c => `${c} = ?`).join(', ')} WHERE id = ?`,
+        [...cols.map(c => patch[c]), id]);
+
+      const next = await dbGet(`SELECT * FROM admin_users WHERE id = ?`, [id]);
+      if (patch.role) console.log(`[Права] ${next.username}: роль -> ${patch.role}`);
+      const keys = await passkeyCounts();
+      ok(res, { ...adminView(next), passkeys: keys.get(id) || 0 });
+    } catch (e) {
+      bad(res, /UNIQUE/.test(e.message) ? 'Такой логин или e-mail уже заведён' : e.message, 400);
+    }
+  };
+  app.put('/api/v1/admin/admins/:id', requireAdminJWT, updateAdmin);
+  app.patch('/api/v1/admin/admins/:id', requireAdminJWT, updateAdmin);
+
+  app.delete('/api/v1/admin/admins/:id', requireAdminJWT, async (req, res) => {
+    try {
+      const id = parseInt(req.params.id, 10);
+      const row = await dbGet(`SELECT * FROM admin_users WHERE id = ?`, [id]);
+      if (!row) return bad(res, 'Администратор не найден', 404);
+      if (String(req.user?.userId) === String(id)) {
+        return bad(res, 'Нельзя удалить самого себя', 409);
+      }
+      if (access.normalizeRole(row.role) === 'SUPER_ADMIN' && (await superAdminCount(id)) === 0) {
+        return bad(res, 'Это последний владелец — сначала назначьте другого', 409);
+      }
+      // Ключи уходят вместе с админом, иначе по ним можно было бы войти
+      // на удалённую учётную запись.
+      await dbRun(`DELETE FROM admin_credentials WHERE admin_user_id = ?`, [id]).catch(() => {});
+      await dbRun(`DELETE FROM admin_users WHERE id = ?`, [id]);
+      console.log(`[Права] Удалён администратор ${row.username}`);
+      res.json({ success: true, deleted: String(id) });
+    } catch (e) { bad(res, e.message, 500); }
+  });
 
   // ===========================================================================
   // ПОЛЬЗОВАТЕЛИ

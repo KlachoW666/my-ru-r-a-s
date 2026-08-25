@@ -1817,12 +1817,25 @@ app.get(['/api/v1/fair/verify', '/api/v1/fair/check'], (req, res) => {
 
 // --- БАТТЛЫ -----------------------------------------------------------------
 
+/** id текущего игрока для проверок доступа; у гостя — null. */
+async function viewerIdOf(req) {
+  const user = await currentUser(req, mockUser);
+  return user && !user.isGuest && user.id ? String(user.id) : null;
+}
+
 app.get(['/api/v1/crate-pvp', '/api/v1/battles'], async (req, res) => {
-  res.json({ status: "success", data: await battles.list({ status: req.query.status }) });
+  // viewerId нужен, чтобы создатель и участники видели свой приватный замес
+  // в лобби; всем остальным приватные замесы не показываются вовсе.
+  res.json({
+    status: "success",
+    data: await battles.list({ status: req.query.status, viewerId: await viewerIdOf(req) })
+  });
 });
 
 app.get('/api/v1/battles/:uid', async (req, res) => {
-  const battle = await battles.getByUid(req.params.uid, { withDrops: true });
+  const battle = await battles.getByUid(req.params.uid, {
+    withDrops: true, viewerId: await viewerIdOf(req)
+  });
   if (!battle) return res.status(404).json({ status: "error", code: "NOT_FOUND", message: "Замес не найден" });
   res.json({ status: "success", data: { battle } });
 });
@@ -1870,7 +1883,16 @@ app.post('/api/v1/battles/create', async (req, res) => {
       await adjustBalance(req, mockUser, price);   // не смогли создать — вернули деньги
       return res.status(500).json({ status: "error", message: "Не удалось создать замес" });
     }
-    res.json({ status: "success", data: { battleId: created.uid, uid: created.uid, price } });
+    // Для приватного замеса ссылка — единственный вход, поэтому отдаём её
+    // сразу: в лобби такой замес никому, кроме участников, не показывается.
+    res.json({
+      status: "success",
+      data: {
+        battleId: created.uid, uid: created.uid, price,
+        isPrivate: created.isPrivate,
+        link: `${PUBLIC_URL}/crate-pvp/${created.uid}`
+      }
+    });
   } catch (e) {
     console.error('POST /battles/create:', e);
     res.status(500).json({ status: "error", message: e.message });
@@ -1886,7 +1908,8 @@ async function joinBattle(req, res, asBot) {
       return res.status(401).json({ status: "error", code: "UNAUTHORIZED", message: "Нужна авторизация" });
     }
 
-    const info = await battles.getByUid(uid);
+    const viewerId = user && !user.isGuest && user.id ? String(user.id) : null;
+    const info = await battles.getByUid(uid, { viewerId });
     if (!info) return res.status(404).json({ status: "error", code: "NOT_FOUND", message: "Замес не найден" });
 
     if (!asBot) {
@@ -1899,10 +1922,10 @@ async function joinBattle(req, res, asBot) {
       }
     }
 
-    const joined = await battles.join({ uid, user, asBot });
+    const joined = await battles.join({ uid, user, asBot, viewerId });
     if (joined.error) {
-      return res.status(joined.error === 'NOT_FOUND' ? 404 : 409)
-        .json({ status: "error", code: joined.error, message: joined.message });
+      const code = joined.error === 'NOT_FOUND' ? 404 : joined.error === 'FORBIDDEN' ? 403 : 409;
+      return res.status(code).json({ status: "error", code: joined.error, message: joined.message });
     }
 
     if (!asBot) {
@@ -1919,7 +1942,7 @@ async function joinBattle(req, res, asBot) {
       }
     }
 
-    const battle = await battles.getByUid(uid, { withDrops: true });
+    const battle = await battles.getByUid(uid, { withDrops: true, viewerId });
     res.json({ status: "success", data: { success: true, battle, result } });
   } catch (e) {
     console.error('POST /battles/join:', e);
@@ -1931,7 +1954,7 @@ app.post(['/api/v1/battles/:uid/join'], (req, res) => joinBattle(req, res, false
 app.post(['/api/v1/battles/:uid/add-bot'], (req, res) => joinBattle(req, res, true));
 
 app.post('/api/v1/battles/:uid/recreate', async (req, res) => {
-  const src = await battles.getByUid(req.params.uid);
+  const src = await battles.getByUid(req.params.uid, { viewerId: await viewerIdOf(req) });
   if (!src) return res.status(404).json({ status: "error", code: "NOT_FOUND", message: "Замес не найден" });
   req.body = {
     caseIds: src.cases.map(c => c.slug),
