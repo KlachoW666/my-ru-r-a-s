@@ -1376,18 +1376,50 @@ async function depositTiersConfig() {
   return Array.isArray(cfg.tiers) && cfg.tiers.length ? cfg.tiers : DEPOSIT_TIERS_FALLBACK;
 }
 
+/** Настройка одного тира — нужна при открытии, чтобы найти привязанный кейс. */
+async function tierConfigAt(idx) {
+  const tiers = await depositTiersConfig();
+  return tiers[idx] || null;
+}
+
 /** Какие тиры игрок уже забрал. Ключ — id пользователя. */
 const claimedTiers = new Map();
 
 const TIER_FALLBACK_IMAGE = '/uploads/cases/1786522990114-495918520.webp';
 
-function tierImage(idx, cases) {
-  // Берём картинку реального кейса, но только если файл существует на диске:
-  // в базе встречаются ссылки на удалённые загрузки вроде
-  // /assets/uploaded-placeholder.png, и тир оставался бы без картинки.
-  const c = cases[idx % Math.max(cases.length, 1)];
-  const img = c && c.image;
-  if (img && img.startsWith('/') && fs.existsSync(path.join(PUBLIC_DIR, img))) return img;
+/** Есть ли файл картинки на диске: в базе встречаются ссылки на удалённые загрузки. */
+function imageOnDisk(img) {
+  return !!(img && String(img).startsWith('/') && fs.existsSync(path.join(PUBLIC_DIR, img)));
+}
+
+/**
+ * Кейс, к которому привязан тир.
+ *
+ * Тир может ссылаться на настоящий кейс: `{ name, threshold, slug: 'case-4' }`.
+ * Тогда с него берутся название, картинка и состав. Если ссылки нет — берём
+ * кейс по порядковому номеру, как было раньше.
+ */
+function tierCase(tier, idx, cases) {
+  const slug = tier && (tier.slug || tier.caseSlug || tier.case);
+  if (slug) {
+    const found = cases.find(c => String(c.slug) === String(slug) || String(c.id) === String(slug));
+    if (found) return found;
+  }
+  return cases[idx % Math.max(cases.length, 1)] || null;
+}
+
+function tierImage(tier, idx, cases) {
+  // Приоритет: картинка, заданная в настройке тира -> картинка привязанного
+  // кейса -> любой кейс с живой картинкой -> общий запасной файл.
+  if (imageOnDisk(tier && tier.image)) return tier.image;
+  const c = tierCase(tier, idx, cases);
+  if (c && imageOnDisk(c.image)) return c.image;
+  // Разные тиры не должны выглядеть одинаково: ищем первый неиспользованный
+  // кейс с существующей картинкой, начиная со своего индекса.
+  for (let i = 0; i < cases.length; i++) {
+    const alt = cases[(idx + i) % cases.length];
+    if (alt && imageOnDisk(alt.image)) return alt.image;
+  }
   return TIER_FALLBACK_IMAGE;
 }
 
@@ -1414,13 +1446,17 @@ async function buildDepositTiers(req, mockUser) {
     if (claimed.has(idx)) status = 'opened';
     else if (collected >= t.threshold) status = 'ready';
     else status = 'locked';
+    const src = tierCase(t, idx, cases);
+    const img = tierImage(t, idx, cases);
+    const label = t.name || (src && src.name) || `Кейс ${idx + 1}`;
     return {
       tierIndex: idx,
-      caseName: t.name,
-      caseImage: tierImage(idx, cases),
+      caseName: label,
+      caseImage: img,
       // Дубли под другим именем — на случай, если где-то читается name/image.
-      name: t.name,
-      image: tierImage(idx, cases),
+      name: label,
+      image: img,
+      caseSlug: src ? src.slug : null,
       threshold: t.threshold,
       collected: Math.min(collected, t.threshold),
       status
@@ -1459,27 +1495,31 @@ app.get(['/api/v1/deposit-chain/state', '/api/v1/deposit-chain'], async (req, re
 });
 
 // Забрать бесплатный кейс тира. Фронт зовёт это из openTier().
+//
+// Коды ошибок читаются бандлом (index-B3loti9-.js) и должны быть ровно эти:
+// CHAIN_UNAVAILABLE, CHAIN_OUT_OF_ORDER, CHAIN_INSUFFICIENT_DEPOSIT.
+// Любой другой код уходит в общий тост «что-то пошло не так».
 app.post('/api/v1/deposit-chain/open', async (req, res) => {
   const tierIndex = Number(req.body?.tierIndex);
   const { key, claimed, tiers } = await buildDepositTiers(req, mockUser);
   const tier = tiers[tierIndex];
 
   if (!tier) {
-    return res.status(400).json({ status: "error", code: "NO_TIER", message: "Такого тира нет" });
+    return res.status(400).json({ status: "error", code: "CHAIN_UNAVAILABLE", message: "Такого тира нет" });
   }
   if (tier.status === 'opened') {
-    return res.status(409).json({ status: "error", code: "ALREADY_OPENED", message: "Этот кейс уже забран" });
+    return res.status(409).json({ status: "error", code: "CHAIN_OUT_OF_ORDER", message: "Этот кейс уже забран" });
   }
   if (tier.status !== 'ready') {
     return res.status(403).json({
-      status: "error", code: "NOT_READY",
+      status: "error", code: "CHAIN_INSUFFICIENT_DEPOSIT",
       message: `Нужно пополнить ещё ${tier.threshold - tier.collected} ₽`
     });
   }
 
   // Разыгрываем содержимое по тем же правилам, что и обычный кейс.
   const cases = await getLiveCases();
-  const src = cases[tierIndex % Math.max(cases.length, 1)];
+  const src = tierCase(await tierConfigAt(tierIndex), tierIndex, cases);
   // Пул берём из каталога по цене тира, а не из состава кейса: составы бывают
   // битыми, и бесплатный кейс за 0 руб выдавал предмет за 15 400 руб.
   const nominal = Math.max(tier.threshold, 50);
@@ -1509,11 +1549,34 @@ app.post('/api/v1/deposit-chain/open', async (req, res) => {
     }));
   }
 
+  // Форма ответа снята с бандла, а не придумана. index-B3loti9-.js делает:
+  //   const t = await u.openTier(e);
+  //   return { items: [Ut(t.item)], winnings: Number(t.winAmount) };
+  // то есть читает ОДИН предмет в поле `item` и сумму в `winAmount`.
+  // А Ut() внутри берёт e.itemId и сразу зовёт e.rarity.toUpperCase().
+  //
+  // Сервер отдавал `items: [...]` и `winnings` — фронт получал undefined,
+  // Ut падал на `.rarity` пустого объекта, исключение уходило в общий catch,
+  // и кейс не открывался вообще. Ошибка выглядела как «что-то пошло не так».
+  const payload = item ? {
+    itemId: item.id,
+    id: item.id,
+    name: item.name,
+    image: fixImageUrl(item.image),
+    price: value,
+    // rarity обязана быть строкой: Ut() зовёт toUpperCase() без проверки.
+    rarity: item.rarity || 'REGULAR',
+    color: item.color
+  } : null;
+
   res.json({
     status: "success",
     data: {
       tierIndex,
-      items: item ? [{ id: item.id, name: item.name, image: fixImageUrl(item.image), price: value, rarity: item.rarity, color: item.color }] : [],
+      item: payload,
+      winAmount: value,
+      // Дубли под прежними именами — на случай, если их где-то ещё читают.
+      items: payload ? [payload] : [],
       winnings: value,
       newBalance: balance,
       serverHash, serverSeed, clientSeed, nonce: tierIndex
