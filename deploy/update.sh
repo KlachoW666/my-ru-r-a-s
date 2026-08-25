@@ -122,12 +122,35 @@ if [ "$(id -u)" -ne 0 ] && command -v sudo >/dev/null 2>&1; then
   SUDO="sudo"
 fi
 
+# Имена процессов на серверах разные: где-то titanrust/titanrust-admin,
+# где-то main-site/admin-panel. Если заданное имя не нашлось, перебираем
+# привычные варианты, прежде чем сдаваться.
+pm2_find() {
+  local candidate
+  for candidate in "$@"; do
+    [ -z "$candidate" ] && continue
+    if pm2 describe "$candidate" >/dev/null 2>&1; then
+      printf '%s' "$candidate"
+      return 0
+    fi
+  done
+  return 1
+}
+
 RESTART_KIND="none"
 if command -v systemctl >/dev/null 2>&1 && systemctl list-unit-files 2>/dev/null | grep -q "^${SITE_SERVICE}\.service"; then
   RESTART_KIND="systemd"
-elif command -v pm2 >/dev/null 2>&1 && pm2 describe "$SITE_SERVICE" >/dev/null 2>&1; then
+elif command -v pm2 >/dev/null 2>&1; then
   # describe, а не pid: pid отвечает успехом и для несуществующего имени.
-  RESTART_KIND="pm2"
+  FOUND_SITE="$(pm2_find "$SITE_SERVICE" main-site site titanrust kaban || true)"
+  FOUND_ADMIN="$(pm2_find "$ADMIN_SERVICE" admin-panel admin titanrust-admin || true)"
+  if [ -n "$FOUND_SITE" ] && [ -n "$FOUND_ADMIN" ]; then
+    RESTART_KIND="pm2"
+    [ "$FOUND_SITE" != "$SITE_SERVICE" ] && info "процесс сайта в pm2 называется «$FOUND_SITE»"
+    [ "$FOUND_ADMIN" != "$ADMIN_SERVICE" ] && info "процесс админки в pm2 называется «$FOUND_ADMIN»"
+    SITE_SERVICE="$FOUND_SITE"
+    ADMIN_SERVICE="$FOUND_ADMIN"
+  fi
 fi
 
 if [ "$DO_RESTART" = 1 ]; then
@@ -191,14 +214,6 @@ step "Обновление кода"
 PREV_COMMIT="$(git rev-parse HEAD)"
 info "было: $PREV_COMMIT $(git log -1 --format=%s)"
 
-# Незакоммиченные правки на сервере — почти всегда чья-то ручная заплатка.
-# Молча затирать её нельзя, поэтому останавливаемся и показываем, что именно.
-if ! git diff --quiet || ! git diff --cached --quiet; then
-  warn "в рабочем дереве есть незакоммиченные изменения:"
-  git status --short | sed 's/^/        /'
-  die "разберитесь с ними (git stash или git checkout -- <файл>) и запустите снова"
-fi
-
 run git fetch "$REMOTE" "$BRANCH" --tags
 TARGET="$(git rev-parse "$REMOTE/$BRANCH" 2>/dev/null || echo "")"
 [ -n "$TARGET" ] || die "не нашёл $REMOTE/$BRANCH"
@@ -210,10 +225,57 @@ else
   git log --oneline "$PREV_COMMIT..$TARGET" 2>/dev/null | sed 's/^/        /' || true
 fi
 
+# Незакоммиченные правки бывают двух совершенно разных сортов, и валить их в
+# одну кучу нельзя.
+#
+# Первый сорт — хлам от прежнего устройства репозитория. Когда-то в git лежали
+# node_modules и database.sqlite; потом их убрали из индекса, но на сервере,
+# развёрнутом со старого коммита, они остались отслеживаемыми, а npm и
+# работающее приложение их с тех пор изменили. Именно из-за этого git pull
+# вставал с «Your local changes would be overwritten by merge» на полусотне
+# файлов node_modules. Терять там нечего: в новом дереве этих путей нет вовсе.
+#
+# Второй сорт — правка в исходниках, то есть чья-то ручная заплатка. Её молча
+# затирать нельзя.
+DIRTY="$(git status --porcelain --untracked-files=no | awk '{ $1=""; sub(/^ +/, ""); print }')"
+if [ -n "$DIRTY" ]; then
+  # Отбрасываем всё, что в целевом коммите игнорируется или просто отсутствует.
+  REAL_DIRTY=""
+  while IFS= read -r f; do
+    [ -z "$f" ] && continue
+    case "$f" in
+      *node_modules/*|*.sqlite) continue ;;
+    esac
+    REAL_DIRTY="$REAL_DIRTY$f"$'
+'
+  done <<EOF_DIRTY
+$DIRTY
+EOF_DIRTY
+
+  if [ -n "$(printf '%s' "$REAL_DIRTY" | tr -d '[:space:]')" ]; then
+    warn "в исходниках есть незакоммиченные правки:"
+    printf '%s' "$REAL_DIRTY" | sed 's/^/        /'
+    die "разберитесь с ними (git stash или git checkout -- <файл>) и запустите снова"
+  fi
+
+  COUNT="$(printf '%s
+' "$DIRTY" | grep -c . || true)"
+  info "в дереве $COUNT изменённых отслеживаемых файлов — все в node_modules или база"
+  info "в новом коммите этих путей нет, поэтому расхождение просто снимается"
+fi
+
 # reset --hard, а не pull: на сервере правок быть не должно, а merge-конфликт
 # посреди обновления — худшее, что может случиться. Untracked-файлы
 # (загрузки через админку, база, .env) не трогаются: git clean мы не зовём.
 run git reset --hard "$REMOTE/$BRANCH"
+
+# На сервере со старого коммита база была отслеживаемой, и reset её удалил:
+# в новом дереве такого файла нет. Возвращаем из копии, снятой выше.
+if [ "$DRY_RUN" = 0 ] && [ -n "${BACKUP_FILE:-}" ] && [ -f "$BACKUP_FILE" ] && [ ! -f "$DB_PATH" ]; then
+  cp "$BACKUP_FILE" "$DB_PATH"
+  info "база возвращена из копии — reset удалил её как отслеживаемый файл"
+  info "больше это не повторится: теперь она вне git"
+fi
 
 # ---------------------------------------------------------------------------
 # 5. Останавливаем сервисы

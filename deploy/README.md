@@ -68,15 +68,15 @@ curl -s https://admin.titanrust.ru/api/v1/admin/auth/passkeys
 
 ## Если сервер уже развёрнут со старого коммита
 
-Разово, до первого обычного обновления:
+Файлов `deploy/` на нём ещё нет — достаньте их из origin, дальше всё обычным путём:
 
 ```bash
-cd /var/www/titanrust && bash deploy/first-update.sh
+cd /var/www/titanrust && git fetch origin main && git checkout origin/main -- deploy/ && bash deploy/update.sh
 ```
 
-В первом коммите в git лежали `node_modules` и `database.sqlite`. Потом их из индекса убрали, а на сервере `npm install` успел пересобрать нативные модули — и `git pull` встаёт с «Your local changes would be overwritten by merge», перечисляя полсотни файлов `node_modules`. Обычный `update.sh` такой узел не развяжет: он намеренно отказывается работать, когда в дереве есть расхождения.
+В первом коммите в git лежали `node_modules` и `database.sqlite`. Потом их из индекса убрали, а на сервере `npm install` успел пересобрать нативные модули — поэтому `git pull` встаёт с «Your local changes would be overwritten by merge», перечисляя полсотни файлов `node_modules`.
 
-`first-update.sh` снимает копию базы, переводит дерево на `origin/main` жёстко, возвращает базу на место и ставит зависимости заново. Запускается один раз.
+`update.sh` этот случай разбирает сам: расхождения в `node_modules` и в файле базы снимает молча (в новом дереве этих путей нет, терять там нечего), базу перед этим копирует и возвращает на место. А вот правку в исходниках он не тронет — остановится и покажет, что именно изменено.
 
 ## Обновление
 
