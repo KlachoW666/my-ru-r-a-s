@@ -24,7 +24,7 @@ const path = require('path');
 const fs = require('fs');
 
 const { SKINS_FILE, ADMIN_DB_PATH } = require('./services/steamSync');
-const { registerAuthRoutes, attachAuth, currentUser, guestUser, verifyJWT, ensureAuthSchema, PUBLIC_URL, ALLOW_MOCK_AUTH } = require('./services/auth');
+const { registerAuthRoutes, attachAuth, currentUser, guestUser, verifyJWT, ensureAuthSchema, PUBLIC_URL, ALLOW_MOCK_AUTH, ALLOWED_ORIGINS } = require('./services/auth');
 const {
   startWorker: startCatalogWorker,
   stopWorker: stopCatalogWorker,
@@ -152,7 +152,22 @@ app.set('trust proxy', 1);
 
 // origin:true отражает Origin запроса вместо '*' — обязательно, потому что
 // фронт ходит с withCredentials:true, а с '*' браузер такие ответы отбрасывает.
-app.use(cors({ origin: true, credentials: true }));
+//
+// Но на боевом домене отражать вообще любой Origin нельзя: сайт с чужого
+// адреса получал бы кредитные ответы нашего API. В production отражаем только
+// свои домены (titanrust.ru, www, admin.titanrust.ru + ALLOWED_ORIGINS),
+// в разработке оставляем как было, иначе локальные порты перестанут ходить.
+app.use(cors({
+  origin: (origin, cb) => {
+    if (!origin) return cb(null, true);              // curl, серверные запросы
+    if (process.env.NODE_ENV !== 'production') return cb(null, true);
+    const clean = origin.replace(/\/+$/, '');
+    if (ALLOWED_ORIGINS.has(clean)) return cb(null, true);
+    console.warn(`[CORS] отклонён origin: ${origin}`);
+    return cb(null, false);
+  },
+  credentials: true
+}));
 app.use(express.json());
 
 // Разбор Bearer-токена ДО объявления всех роутов.

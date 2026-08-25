@@ -1,0 +1,306 @@
+#!/usr/bin/env bash
+#
+# Обновление titanrust.ru и admin.titanrust.ru на сервере.
+#
+# Что делает по шагам:
+#   1. проверяет, что окружение готово (git, node, .env);
+#   2. делает копию базы — она не в git, восстановить её больше неоткуда;
+#   3. забирает код из origin и переводит рабочее дерево на него;
+#   4. доставляет зависимости в корне и в сервере админки;
+#   5. перезапускает оба сервиса;
+#   6. проверяет, что оба отвечают, и при неудаче откатывает код обратно.
+#
+# Запуск:
+#   ./deploy/update.sh              обычное обновление
+#   ./deploy/update.sh --dry-run    показать, что будет сделано, ничего не менять
+#   ./deploy/update.sh --no-restart обновить файлы, не трогая сервисы
+#   ./deploy/update.sh --branch dev обновиться на другую ветку
+#
+# Настройки можно переопределить в deploy/deploy.conf рядом со скриптом
+# (файл не обязателен, см. deploy.conf.example).
+
+set -Eeuo pipefail
+
+# ---------------------------------------------------------------------------
+# Расположение и настройки
+# ---------------------------------------------------------------------------
+
+SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+APP_DIR="$(cd "$SCRIPT_DIR/.." && pwd)"
+
+# Значения по умолчанию. Любое переопределяется в deploy.conf или переменной
+# окружения: BRANCH=dev ./deploy/update.sh
+BRANCH="${BRANCH:-main}"
+REMOTE="${REMOTE:-origin}"
+SITE_SERVICE="${SITE_SERVICE:-titanrust}"
+ADMIN_SERVICE="${ADMIN_SERVICE:-titanrust-admin}"
+BACKUP_DIR="${BACKUP_DIR:-$APP_DIR/backups}"
+KEEP_BACKUPS="${KEEP_BACKUPS:-10}"
+HEALTH_RETRIES="${HEALTH_RETRIES:-20}"
+HEALTH_DELAY="${HEALTH_DELAY:-1}"
+
+[ -f "$SCRIPT_DIR/deploy.conf" ] && . "$SCRIPT_DIR/deploy.conf"
+
+DRY_RUN=0
+DO_RESTART=1
+while [ $# -gt 0 ]; do
+  case "$1" in
+    --dry-run)    DRY_RUN=1 ;;
+    --no-restart) DO_RESTART=0 ;;
+    --branch)     BRANCH="${2:?--branch требует имя ветки}"; shift ;;
+    -h|--help)    sed -n '2,25p' "$0" | sed 's/^# \{0,1\}//'; exit 0 ;;
+    *) echo "Неизвестный аргумент: $1" >&2; exit 2 ;;
+  esac
+  shift
+done
+
+# ---------------------------------------------------------------------------
+# Вывод
+# ---------------------------------------------------------------------------
+
+if [ -t 1 ]; then
+  C_OK=$'\033[32m'; C_ERR=$'\033[31m'; C_WARN=$'\033[33m'; C_DIM=$'\033[2m'; C_OFF=$'\033[0m'
+else
+  C_OK=''; C_ERR=''; C_WARN=''; C_DIM=''; C_OFF=''
+fi
+
+step() { printf '\n%s==>%s %s\n' "$C_OK" "$C_OFF" "$*"; }
+info() { printf '    %s\n' "$*"; }
+warn() { printf '    %s!%s %s\n' "$C_WARN" "$C_OFF" "$*"; }
+die()  { printf '\n%sОшибка:%s %s\n' "$C_ERR" "$C_OFF" "$*" >&2; exit 1; }
+run()  {
+  if [ "$DRY_RUN" = 1 ]; then printf '    %s[dry-run]%s %s\n' "$C_DIM" "$C_OFF" "$*"; return 0; fi
+  "$@"
+}
+
+# ---------------------------------------------------------------------------
+# 1. Проверки перед началом
+# ---------------------------------------------------------------------------
+
+step "Проверка окружения"
+
+cd "$APP_DIR"
+info "каталог: $APP_DIR"
+
+command -v git  >/dev/null 2>&1 || die "git не установлен"
+command -v node >/dev/null 2>&1 || die "node не установлен"
+command -v npm  >/dev/null 2>&1 || die "npm не установлен"
+
+# rev-parse, а не «есть ли каталог .git»: в рабочем дереве git (git worktree)
+# .git — это файл, и проверка по каталогу ложно срабатывала бы.
+git rev-parse --git-dir >/dev/null 2>&1 || die "$APP_DIR — не git-репозиторий. Первый раз разворачивайте так:
+    git clone <repo> $APP_DIR && cp .env.example .env && \$EDITOR .env"
+
+# Без .env боевой сервер всё равно не поднимется: JWT_SECRET по умолчанию
+# признан небезопасным, и при NODE_ENV=production процесс завершится сразу.
+[ -f "$APP_DIR/.env" ] || die ".env не найден. Скопируйте .env.example в .env и заполните
+    JWT_SECRET, STEAM_API_KEY, SMTP_*, ADMIN_* — иначе сервер не стартует."
+
+NODE_MAJOR="$(node -p 'process.versions.node.split(".")[0]')"
+[ "$NODE_MAJOR" -ge 18 ] || die "нужен Node 18+, установлен $(node -v)"
+info "node $(node -v), npm $(npm -v)"
+
+# Порты берём из .env, чтобы проверка здоровья стучалась туда же, куда слушает сервер.
+get_env() { grep -E "^\s*$1\s*=" "$APP_DIR/.env" 2>/dev/null | tail -1 | cut -d= -f2- | tr -d '"'\''' | xargs || true; }
+SITE_PORT="$(get_env PORT)";        SITE_PORT="${SITE_PORT:-3101}"
+ADMIN_PORT="$(get_env ADMIN_PORT)"; ADMIN_PORT="${ADMIN_PORT:-8080}"
+info "порты: сайт $SITE_PORT, админка $ADMIN_PORT"
+
+if [ "$(get_env ADMIN_REQUIRE_AUTH)" != "1" ]; then
+  warn "ADMIN_REQUIRE_AUTH не равен 1 — админка пускает любой запрос без токена."
+  warn "Заведите passkey и включите проверку до того, как откроете домен наружу."
+fi
+
+# ---------------------------------------------------------------------------
+# 2. Как перезапускать сервисы
+# ---------------------------------------------------------------------------
+
+RESTART_KIND="none"
+if command -v systemctl >/dev/null 2>&1 && systemctl list-unit-files 2>/dev/null | grep -q "^${SITE_SERVICE}\.service"; then
+  RESTART_KIND="systemd"
+elif command -v pm2 >/dev/null 2>&1 && pm2 pid "$SITE_SERVICE" >/dev/null 2>&1; then
+  RESTART_KIND="pm2"
+fi
+
+if [ "$DO_RESTART" = 1 ]; then
+  case "$RESTART_KIND" in
+    systemd) info "перезапуск через systemd: $SITE_SERVICE, $ADMIN_SERVICE" ;;
+    pm2)     info "перезапуск через pm2: $SITE_SERVICE, $ADMIN_SERVICE" ;;
+    none)
+      warn "ни systemd-юнита «$SITE_SERVICE», ни процесса pm2 с таким именем не нашлось."
+      warn "Код обновлю, но перезапускать будет нечего — сделайте это руками."
+      warn "Готовые юниты лежат в deploy/systemd/, ставятся так:"
+      warn "  sudo cp deploy/systemd/*.service /etc/systemd/system/ && sudo systemctl daemon-reload"
+      DO_RESTART=0
+      ;;
+  esac
+fi
+
+# ---------------------------------------------------------------------------
+# 3. Копия базы
+# ---------------------------------------------------------------------------
+
+step "Резервная копия базы"
+
+DB_PATH="$APP_DIR/admin.titanrust.ru/server/database.sqlite"
+STAMP="$(date +%Y%m%d-%H%M%S)"
+BACKUP_FILE="$BACKUP_DIR/database-$STAMP.sqlite"
+
+if [ -f "$DB_PATH" ]; then
+  run mkdir -p "$BACKUP_DIR"
+  # sqlite3 .backup корректно снимает копию с работающей базы; если утилиты
+  # нет — обычное копирование. Оно безопасно, потому что сервисы мы
+  # останавливаем следующим шагом, а до этого копия нужна «как есть».
+  if command -v sqlite3 >/dev/null 2>&1; then
+    run sqlite3 "$DB_PATH" ".backup '$BACKUP_FILE'"
+  else
+    run cp "$DB_PATH" "$BACKUP_FILE"
+  fi
+  info "$BACKUP_FILE"
+  # Старые копии подчищаем, иначе диск кончится незаметно.
+  if [ "$DRY_RUN" = 0 ] && [ -d "$BACKUP_DIR" ]; then
+    ls -1t "$BACKUP_DIR"/database-*.sqlite 2>/dev/null | tail -n +"$((KEEP_BACKUPS + 1))" | while read -r old; do
+      rm -f "$old"; info "удалена старая копия: $(basename "$old")"
+    done
+  fi
+else
+  warn "базы ещё нет — она создастся при первом запуске админки"
+fi
+
+# ---------------------------------------------------------------------------
+# 4. Забираем код
+# ---------------------------------------------------------------------------
+
+step "Обновление кода"
+
+PREV_COMMIT="$(git rev-parse HEAD)"
+info "было: $PREV_COMMIT $(git log -1 --format=%s)"
+
+# Незакоммиченные правки на сервере — почти всегда чья-то ручная заплатка.
+# Молча затирать её нельзя, поэтому останавливаемся и показываем, что именно.
+if ! git diff --quiet || ! git diff --cached --quiet; then
+  warn "в рабочем дереве есть незакоммиченные изменения:"
+  git status --short | sed 's/^/        /'
+  die "разберитесь с ними (git stash или git checkout -- <файл>) и запустите снова"
+fi
+
+run git fetch "$REMOTE" "$BRANCH" --tags
+TARGET="$(git rev-parse "$REMOTE/$BRANCH" 2>/dev/null || echo "")"
+[ -n "$TARGET" ] || die "не нашёл $REMOTE/$BRANCH"
+
+if [ "$TARGET" = "$PREV_COMMIT" ]; then
+  info "уже на свежем коммите, обновлять нечего"
+else
+  info "станет: $TARGET $(git log -1 --format=%s "$TARGET")"
+  git log --oneline "$PREV_COMMIT..$TARGET" 2>/dev/null | sed 's/^/        /' || true
+fi
+
+# reset --hard, а не pull: на сервере правок быть не должно, а merge-конфликт
+# посреди обновления — худшее, что может случиться. Untracked-файлы
+# (загрузки через админку, база, .env) не трогаются: git clean мы не зовём.
+run git reset --hard "$REMOTE/$BRANCH"
+
+# ---------------------------------------------------------------------------
+# 5. Останавливаем сервисы
+# ---------------------------------------------------------------------------
+
+svc() {
+  local action="$1" name="$2"
+  case "$RESTART_KIND" in
+    systemd) run sudo systemctl "$action" "$name" ;;
+    pm2)     case "$action" in
+               stop)    run pm2 stop "$name" ;;
+               start|restart) run pm2 restart "$name" ;;
+             esac ;;
+  esac
+}
+
+if [ "$DO_RESTART" = 1 ]; then
+  step "Остановка сервисов"
+  # Останавливаем до npm install: пересборка sqlite3 не должна идти под
+  # работающим процессом, который держит нативный модуль открытым.
+  svc stop "$ADMIN_SERVICE"
+  svc stop "$SITE_SERVICE"
+  info "остановлены"
+fi
+
+# ---------------------------------------------------------------------------
+# 6. Зависимости
+# ---------------------------------------------------------------------------
+
+step "Зависимости"
+
+npm_install() {
+  local dir="$1"
+  info "npm ci в $dir"
+  if [ "$DRY_RUN" = 1 ]; then return 0; fi
+  # npm ci воспроизводит lock-файл точь-в-точь; если lock разошёлся с
+  # package.json, ci упадёт — тогда откатываемся на install.
+  ( cd "$dir" && ( npm ci --omit=dev --no-audit --no-fund || npm install --omit=dev --no-audit --no-fund ) )
+}
+
+npm_install "$APP_DIR"
+npm_install "$APP_DIR/admin.titanrust.ru/server"
+
+# server.js игрового сайта берёт sqlite3 из node_modules админки — если их
+# снести, отвалится вся живая выдача сайта. Проверяем, что модуль на месте.
+if [ "$DRY_RUN" = 0 ] && [ ! -d "$APP_DIR/admin.titanrust.ru/server/node_modules/sqlite3" ]; then
+  die "sqlite3 не установился в admin.titanrust.ru/server/node_modules — сайт без него не поднимется"
+fi
+
+# ---------------------------------------------------------------------------
+# 7. Запуск и проверка
+# ---------------------------------------------------------------------------
+
+health() {
+  local url="$1" name="$2" i=0
+  while [ "$i" -lt "$HEALTH_RETRIES" ]; do
+    if curl -fsS -o /dev/null --max-time 5 "$url"; then
+      info "$name отвечает"
+      return 0
+    fi
+    i=$((i + 1))
+    sleep "$HEALTH_DELAY"
+  done
+  warn "$name не ответил за $((HEALTH_RETRIES * HEALTH_DELAY)) с ($url)"
+  return 1
+}
+
+rollback() {
+  printf '\n%sОткат на %s%s\n' "$C_WARN" "$PREV_COMMIT" "$C_OFF"
+  git reset --hard "$PREV_COMMIT"
+  ( cd "$APP_DIR" && npm ci --omit=dev --no-audit --no-fund >/dev/null 2>&1 || true )
+  ( cd "$APP_DIR/admin.titanrust.ru/server" && npm ci --omit=dev --no-audit --no-fund >/dev/null 2>&1 || true )
+  svc start "$ADMIN_SERVICE"
+  svc start "$SITE_SERVICE"
+  echo "Код возвращён на прежний коммит. База не трогалась, копия: $BACKUP_FILE"
+  echo "Логи: journalctl -u $SITE_SERVICE -n 100 --no-pager"
+}
+
+if [ "$DO_RESTART" = 1 ]; then
+  step "Запуск"
+  svc start "$ADMIN_SERVICE"
+  svc start "$SITE_SERVICE"
+
+  if [ "$DRY_RUN" = 0 ]; then
+    step "Проверка"
+    ok=1
+    health "http://127.0.0.1:$ADMIN_PORT/api/v1/admin/auth/passkeys" "админка" || ok=0
+    health "http://127.0.0.1:$SITE_PORT/api/v1/cases/health"        "сайт"    || ok=0
+    if [ "$ok" = 0 ]; then
+      rollback
+      exit 1
+    fi
+  fi
+fi
+
+# ---------------------------------------------------------------------------
+# Итог
+# ---------------------------------------------------------------------------
+
+step "Готово"
+info "коммит: $(git rev-parse --short HEAD) $(git log -1 --format=%s)"
+[ -f "${BACKUP_FILE:-}" ] && info "копия базы: $BACKUP_FILE"
+if [ "$DRY_RUN" = 1 ]; then
+  printf '\n%sЭто был dry-run — ничего не изменено.%s\n' "$C_DIM" "$C_OFF"
+fi

@@ -20,11 +20,20 @@ Thumbs.db
 *_after_click.png
 screenshot*.png
 
-# Резервные копии базы
+# База. В репозитории её быть не должно: update.sh на сервере делает
+# git reset --hard, и отслеживаемый файл базы затёр бы боевые данные.
+# Схему создаёт initDatabase() при первом запуске админки.
+admin.titanrust.ru/server/database.sqlite
 *.sqlite-journal
 *.sqlite-wal
 *.sqlite-shm
 *.sqlite.bak
+
+# Резервные копии, которые делает update.sh
+backups/
+
+# Настройки деплоя конкретной машины
+deploy/deploy.conf
 
 # Кэш графа знаний (генерируется командой graphify)
 graphify-out/cache/

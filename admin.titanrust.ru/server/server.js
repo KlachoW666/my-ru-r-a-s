@@ -32,7 +32,31 @@ const PUBLIC_DIR = path.join(__dirname, '..', 'public');
 const STEAM_RUST_APPID = 252490;
 const STEAM_IMAGE_BASE = "https://community.cloudflare.steamstatic.com/economy/image/";
 
-app.use(cors({ origin: true, credentials: true }));
+// За nginx: без этого req.protocol всегда 'http', а req.ip — адрес прокси,
+// а не посетителя. Игровой сервер это уже делает, админка отставала.
+app.set('trust proxy', 1);
+
+// На боевом домене отражать любой Origin нельзя. Список берём из ADMIN_ORIGINS —
+// той же переменной, что задаёт origin'ы для passkey: они обязаны совпадать,
+// иначе вход по ключу и запросы к API разойдутся.
+const CORS_ORIGINS = new Set(
+  String(process.env.ADMIN_ORIGINS ||
+    (process.env.NODE_ENV === 'production'
+      ? 'https://admin.titanrust.ru,https://titanrust.ru'
+      : 'http://localhost:8080,http://127.0.0.1:8080')
+  ).split(',').map(s => s.trim().replace(/\/+$/, '')).filter(Boolean)
+);
+
+app.use(cors({
+  origin: (origin, cb) => {
+    if (!origin) return cb(null, true);              // curl, серверные запросы
+    if (process.env.NODE_ENV !== 'production') return cb(null, true);
+    if (CORS_ORIGINS.has(origin.replace(/\/+$/, ''))) return cb(null, true);
+    console.warn(`[CORS] отклонён origin: ${origin}`);
+    return cb(null, false);
+  },
+  credentials: true
+}));
 app.use(express.json({ limit: '10mb' }));
 app.use(express.urlencoded({ extended: true }));
 
