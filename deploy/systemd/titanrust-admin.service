@@ -1,0 +1,36 @@
+[Unit]
+Description=admin.titanrust.ru — сервер админки
+Documentation=https://github.com/KlachoW666/my-ru-r-a-s
+After=network-online.target
+Wants=network-online.target
+
+# База одна на два сервиса, и создаёт её именно админка (initDatabase()).
+# Поэтому игровой сервер поднимается после неё.
+Before=titanrust.service
+
+[Service]
+Type=simple
+User=titanrust
+Group=titanrust
+WorkingDirectory=/var/www/titanrust/admin.titanrust.ru/server
+ExecStart=/usr/bin/node server.js
+
+Environment=NODE_ENV=production
+
+Restart=always
+RestartSec=3
+StartLimitIntervalSec=60
+StartLimitBurst=5
+
+StandardOutput=journal
+StandardError=journal
+SyslogIdentifier=titanrust-admin
+
+NoNewPrivileges=true
+PrivateTmp=true
+ProtectSystem=strict
+ProtectHome=true
+ReadWritePaths=/var/www/titanrust/admin.titanrust.ru/server /var/www/titanrust/public/uploads
+
+[Install]
+WantedBy=multi-user.target

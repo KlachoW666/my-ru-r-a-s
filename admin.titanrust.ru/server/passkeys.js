@@ -94,7 +94,19 @@ function register({ app, db, dbAll, dbGet, dbRun, generateAdminJWT }) {
         }
       }
 
-      const admin = await defaultAdmin();
+      // Ключ привязывается к конкретной строке admin_users — от неё берётся
+      // роль при входе. Без username ключ уходит владельцу: так заводится
+      // первый ключ, когда других администраторов ещё нет.
+      let admin;
+      const wanted = String(req.body?.username || '').trim();
+      if (wanted) {
+        admin = await dbGet(`SELECT * FROM admin_users WHERE username = ?`, [wanted]).catch(() => null);
+        if (!admin) {
+          return res.status(404).json({ success: false, message: `Администратор «${wanted}» не заведён` });
+        }
+      } else {
+        admin = await defaultAdmin();
+      }
       const existing = await dbAll(`SELECT credential_id, transports FROM admin_credentials WHERE admin_user_id = ?`, [admin.id]).catch(() => []);
 
       const options = await generateRegistrationOptions({
@@ -142,10 +154,13 @@ function register({ app, db, dbAll, dbGet, dbRun, generateAdminJWT }) {
          JSON.stringify(credential.transports || []), label || 'passkey']
       );
 
-      const admin = await defaultAdmin();
+      // Токен выдаём владельцу ключа, а не «первому админу из таблицы»:
+      // иначе любой заведённый ключ входил бы с правами владельца.
+      const admin = (await dbGet(`SELECT * FROM admin_users WHERE id = ?`, [saved.adminUserId]).catch(() => null))
+        || await defaultAdmin();
       const token = generateAdminJWT(admin);
-      console.log(`[Passkey] Зарегистрирован ключ для ${admin.username}`);
-      res.json({ success: true, data: { accessToken: token, verified: true } });
+      console.log(`[Passkey] Зарегистрирован ключ для ${admin.username} (роль ${admin.role || 'SUPER_ADMIN'})`);
+      res.json({ success: true, data: { accessToken: token, verified: true, role: admin.role } });
     } catch (e) {
       console.error('[Passkey] register/verify:', e.message);
       res.status(400).json({ success: false, message: e.message });
@@ -216,8 +231,8 @@ function register({ app, db, dbAll, dbGet, dbRun, generateAdminJWT }) {
 
       const admin = (await dbGet(`SELECT * FROM admin_users WHERE id = ?`, [row.admin_user_id])) || await defaultAdmin();
       const token = generateAdminJWT(admin);
-      console.log(`[Passkey] Вход: ${admin.username}`);
-      res.json({ success: true, data: { accessToken: token } });
+      console.log(`[Passkey] Вход: ${admin.username} (роль ${admin.role || 'SUPER_ADMIN'})`);
+      res.json({ success: true, data: { accessToken: token, role: admin.role } });
     } catch (e) {
       console.error('[Passkey] login/verify:', e.message);
       res.status(401).json({ success: false, message: e.message });
@@ -226,7 +241,11 @@ function register({ app, db, dbAll, dbGet, dbRun, generateAdminJWT }) {
 
   // Сколько ключей заведено — для диагностики и стартового предупреждения.
   app.get('/api/v1/admin/auth/passkeys', async (req, res) => {
-    const rows = await dbAll(`SELECT id, label, created_at, last_used_at FROM admin_credentials`).catch(() => []);
+    const rows = await dbAll(
+      `SELECT c.id, c.label, c.created_at, c.last_used_at,
+              c.admin_user_id, u.username, u.role
+         FROM admin_credentials c
+         LEFT JOIN admin_users u ON u.id = c.admin_user_id`).catch(() => []);
     res.json({ success: true, data: { count: rows.length, rpId: RP_ID, origins: ORIGINS, passkeys: rows } });
   });
 

@@ -56,12 +56,15 @@ const REFRESH_COOKIE = 'kaban_rt';
 /** Домен для cookie: .titanrust.ru покрывает www и поддомены. */
 const COOKIE_DOMAIN = process.env.COOKIE_DOMAIN || (IS_PROD ? '.titanrust.ru' : undefined);
 
-/** Куда разрешено редиректить после логина. */
+/** Куда разрешено редиректить после логина; он же список origin'ов для CORS. */
 const ALLOWED_ORIGINS = new Set(
   [
     PUBLIC_URL,
     'https://titanrust.ru',
     'https://www.titanrust.ru',
+    // Второй домен проекта: админка ходит в ту же базу, но через свой сервер.
+    // В списке нужен, чтобы её запросы к игровому API не резались CORS.
+    'https://admin.titanrust.ru',
     ...(IS_PROD
       ? []
       : ['http://localhost:3101', 'http://localhost:3030', 'http://127.0.0.1:3101', 'http://127.0.0.1:3030']),
@@ -534,6 +537,7 @@ async function currentUser(req, mockUser) {
 }
 
 module.exports = {
+  ALLOWED_ORIGINS,
   registerAuthRoutes,
   issueSession,
   attachAuth,

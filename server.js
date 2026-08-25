@@ -24,7 +24,7 @@ const path = require('path');
 const fs = require('fs');
 
 const { SKINS_FILE, ADMIN_DB_PATH } = require('./services/steamSync');
-const { registerAuthRoutes, attachAuth, currentUser, guestUser, verifyJWT, ensureAuthSchema, PUBLIC_URL, ALLOW_MOCK_AUTH } = require('./services/auth');
+const { registerAuthRoutes, attachAuth, currentUser, guestUser, verifyJWT, ensureAuthSchema, PUBLIC_URL, ALLOW_MOCK_AUTH, ALLOWED_ORIGINS } = require('./services/auth');
 const {
   startWorker: startCatalogWorker,
   stopWorker: stopCatalogWorker,
@@ -152,7 +152,22 @@ app.set('trust proxy', 1);
 
 // origin:true отражает Origin запроса вместо '*' — обязательно, потому что
 // фронт ходит с withCredentials:true, а с '*' браузер такие ответы отбрасывает.
-app.use(cors({ origin: true, credentials: true }));
+//
+// Но на боевом домене отражать вообще любой Origin нельзя: сайт с чужого
+// адреса получал бы кредитные ответы нашего API. В production отражаем только
+// свои домены (titanrust.ru, www, admin.titanrust.ru + ALLOWED_ORIGINS),
+// в разработке оставляем как было, иначе локальные порты перестанут ходить.
+app.use(cors({
+  origin: (origin, cb) => {
+    if (!origin) return cb(null, true);              // curl, серверные запросы
+    if (process.env.NODE_ENV !== 'production') return cb(null, true);
+    const clean = origin.replace(/\/+$/, '');
+    if (ALLOWED_ORIGINS.has(clean)) return cb(null, true);
+    console.warn(`[CORS] отклонён origin: ${origin}`);
+    return cb(null, false);
+  },
+  credentials: true
+}));
 app.use(express.json());
 
 // Разбор Bearer-токена ДО объявления всех роутов.
@@ -1376,18 +1391,50 @@ async function depositTiersConfig() {
   return Array.isArray(cfg.tiers) && cfg.tiers.length ? cfg.tiers : DEPOSIT_TIERS_FALLBACK;
 }
 
+/** Настройка одного тира — нужна при открытии, чтобы найти привязанный кейс. */
+async function tierConfigAt(idx) {
+  const tiers = await depositTiersConfig();
+  return tiers[idx] || null;
+}
+
 /** Какие тиры игрок уже забрал. Ключ — id пользователя. */
 const claimedTiers = new Map();
 
 const TIER_FALLBACK_IMAGE = '/uploads/cases/1786522990114-495918520.webp';
 
-function tierImage(idx, cases) {
-  // Берём картинку реального кейса, но только если файл существует на диске:
-  // в базе встречаются ссылки на удалённые загрузки вроде
-  // /assets/uploaded-placeholder.png, и тир оставался бы без картинки.
-  const c = cases[idx % Math.max(cases.length, 1)];
-  const img = c && c.image;
-  if (img && img.startsWith('/') && fs.existsSync(path.join(PUBLIC_DIR, img))) return img;
+/** Есть ли файл картинки на диске: в базе встречаются ссылки на удалённые загрузки. */
+function imageOnDisk(img) {
+  return !!(img && String(img).startsWith('/') && fs.existsSync(path.join(PUBLIC_DIR, img)));
+}
+
+/**
+ * Кейс, к которому привязан тир.
+ *
+ * Тир может ссылаться на настоящий кейс: `{ name, threshold, slug: 'case-4' }`.
+ * Тогда с него берутся название, картинка и состав. Если ссылки нет — берём
+ * кейс по порядковому номеру, как было раньше.
+ */
+function tierCase(tier, idx, cases) {
+  const slug = tier && (tier.slug || tier.caseSlug || tier.case);
+  if (slug) {
+    const found = cases.find(c => String(c.slug) === String(slug) || String(c.id) === String(slug));
+    if (found) return found;
+  }
+  return cases[idx % Math.max(cases.length, 1)] || null;
+}
+
+function tierImage(tier, idx, cases) {
+  // Приоритет: картинка, заданная в настройке тира -> картинка привязанного
+  // кейса -> любой кейс с живой картинкой -> общий запасной файл.
+  if (imageOnDisk(tier && tier.image)) return tier.image;
+  const c = tierCase(tier, idx, cases);
+  if (c && imageOnDisk(c.image)) return c.image;
+  // Разные тиры не должны выглядеть одинаково: ищем первый неиспользованный
+  // кейс с существующей картинкой, начиная со своего индекса.
+  for (let i = 0; i < cases.length; i++) {
+    const alt = cases[(idx + i) % cases.length];
+    if (alt && imageOnDisk(alt.image)) return alt.image;
+  }
   return TIER_FALLBACK_IMAGE;
 }
 
@@ -1414,13 +1461,17 @@ async function buildDepositTiers(req, mockUser) {
     if (claimed.has(idx)) status = 'opened';
     else if (collected >= t.threshold) status = 'ready';
     else status = 'locked';
+    const src = tierCase(t, idx, cases);
+    const img = tierImage(t, idx, cases);
+    const label = t.name || (src && src.name) || `Кейс ${idx + 1}`;
     return {
       tierIndex: idx,
-      caseName: t.name,
-      caseImage: tierImage(idx, cases),
+      caseName: label,
+      caseImage: img,
       // Дубли под другим именем — на случай, если где-то читается name/image.
-      name: t.name,
-      image: tierImage(idx, cases),
+      name: label,
+      image: img,
+      caseSlug: src ? src.slug : null,
       threshold: t.threshold,
       collected: Math.min(collected, t.threshold),
       status
@@ -1459,27 +1510,31 @@ app.get(['/api/v1/deposit-chain/state', '/api/v1/deposit-chain'], async (req, re
 });
 
 // Забрать бесплатный кейс тира. Фронт зовёт это из openTier().
+//
+// Коды ошибок читаются бандлом (index-B3loti9-.js) и должны быть ровно эти:
+// CHAIN_UNAVAILABLE, CHAIN_OUT_OF_ORDER, CHAIN_INSUFFICIENT_DEPOSIT.
+// Любой другой код уходит в общий тост «что-то пошло не так».
 app.post('/api/v1/deposit-chain/open', async (req, res) => {
   const tierIndex = Number(req.body?.tierIndex);
   const { key, claimed, tiers } = await buildDepositTiers(req, mockUser);
   const tier = tiers[tierIndex];
 
   if (!tier) {
-    return res.status(400).json({ status: "error", code: "NO_TIER", message: "Такого тира нет" });
+    return res.status(400).json({ status: "error", code: "CHAIN_UNAVAILABLE", message: "Такого тира нет" });
   }
   if (tier.status === 'opened') {
-    return res.status(409).json({ status: "error", code: "ALREADY_OPENED", message: "Этот кейс уже забран" });
+    return res.status(409).json({ status: "error", code: "CHAIN_OUT_OF_ORDER", message: "Этот кейс уже забран" });
   }
   if (tier.status !== 'ready') {
     return res.status(403).json({
-      status: "error", code: "NOT_READY",
+      status: "error", code: "CHAIN_INSUFFICIENT_DEPOSIT",
       message: `Нужно пополнить ещё ${tier.threshold - tier.collected} ₽`
     });
   }
 
   // Разыгрываем содержимое по тем же правилам, что и обычный кейс.
   const cases = await getLiveCases();
-  const src = cases[tierIndex % Math.max(cases.length, 1)];
+  const src = tierCase(await tierConfigAt(tierIndex), tierIndex, cases);
   // Пул берём из каталога по цене тира, а не из состава кейса: составы бывают
   // битыми, и бесплатный кейс за 0 руб выдавал предмет за 15 400 руб.
   const nominal = Math.max(tier.threshold, 50);
@@ -1509,11 +1564,34 @@ app.post('/api/v1/deposit-chain/open', async (req, res) => {
     }));
   }
 
+  // Форма ответа снята с бандла, а не придумана. index-B3loti9-.js делает:
+  //   const t = await u.openTier(e);
+  //   return { items: [Ut(t.item)], winnings: Number(t.winAmount) };
+  // то есть читает ОДИН предмет в поле `item` и сумму в `winAmount`.
+  // А Ut() внутри берёт e.itemId и сразу зовёт e.rarity.toUpperCase().
+  //
+  // Сервер отдавал `items: [...]` и `winnings` — фронт получал undefined,
+  // Ut падал на `.rarity` пустого объекта, исключение уходило в общий catch,
+  // и кейс не открывался вообще. Ошибка выглядела как «что-то пошло не так».
+  const payload = item ? {
+    itemId: item.id,
+    id: item.id,
+    name: item.name,
+    image: fixImageUrl(item.image),
+    price: value,
+    // rarity обязана быть строкой: Ut() зовёт toUpperCase() без проверки.
+    rarity: item.rarity || 'REGULAR',
+    color: item.color
+  } : null;
+
   res.json({
     status: "success",
     data: {
       tierIndex,
-      items: item ? [{ id: item.id, name: item.name, image: fixImageUrl(item.image), price: value, rarity: item.rarity, color: item.color }] : [],
+      item: payload,
+      winAmount: value,
+      // Дубли под прежними именами — на случай, если их где-то ещё читают.
+      items: payload ? [payload] : [],
       winnings: value,
       newBalance: balance,
       serverHash, serverSeed, clientSeed, nonce: tierIndex
@@ -1817,12 +1895,25 @@ app.get(['/api/v1/fair/verify', '/api/v1/fair/check'], (req, res) => {
 
 // --- БАТТЛЫ -----------------------------------------------------------------
 
+/** id текущего игрока для проверок доступа; у гостя — null. */
+async function viewerIdOf(req) {
+  const user = await currentUser(req, mockUser);
+  return user && !user.isGuest && user.id ? String(user.id) : null;
+}
+
 app.get(['/api/v1/crate-pvp', '/api/v1/battles'], async (req, res) => {
-  res.json({ status: "success", data: await battles.list({ status: req.query.status }) });
+  // viewerId нужен, чтобы создатель и участники видели свой приватный замес
+  // в лобби; всем остальным приватные замесы не показываются вовсе.
+  res.json({
+    status: "success",
+    data: await battles.list({ status: req.query.status, viewerId: await viewerIdOf(req) })
+  });
 });
 
 app.get('/api/v1/battles/:uid', async (req, res) => {
-  const battle = await battles.getByUid(req.params.uid, { withDrops: true });
+  const battle = await battles.getByUid(req.params.uid, {
+    withDrops: true, viewerId: await viewerIdOf(req)
+  });
   if (!battle) return res.status(404).json({ status: "error", code: "NOT_FOUND", message: "Замес не найден" });
   res.json({ status: "success", data: { battle } });
 });
@@ -1870,7 +1961,16 @@ app.post('/api/v1/battles/create', async (req, res) => {
       await adjustBalance(req, mockUser, price);   // не смогли создать — вернули деньги
       return res.status(500).json({ status: "error", message: "Не удалось создать замес" });
     }
-    res.json({ status: "success", data: { battleId: created.uid, uid: created.uid, price } });
+    // Для приватного замеса ссылка — единственный вход, поэтому отдаём её
+    // сразу: в лобби такой замес никому, кроме участников, не показывается.
+    res.json({
+      status: "success",
+      data: {
+        battleId: created.uid, uid: created.uid, price,
+        isPrivate: created.isPrivate,
+        link: `${PUBLIC_URL}/crate-pvp/${created.uid}`
+      }
+    });
   } catch (e) {
     console.error('POST /battles/create:', e);
     res.status(500).json({ status: "error", message: e.message });
@@ -1886,7 +1986,8 @@ async function joinBattle(req, res, asBot) {
       return res.status(401).json({ status: "error", code: "UNAUTHORIZED", message: "Нужна авторизация" });
     }
 
-    const info = await battles.getByUid(uid);
+    const viewerId = user && !user.isGuest && user.id ? String(user.id) : null;
+    const info = await battles.getByUid(uid, { viewerId });
     if (!info) return res.status(404).json({ status: "error", code: "NOT_FOUND", message: "Замес не найден" });
 
     if (!asBot) {
@@ -1899,10 +2000,10 @@ async function joinBattle(req, res, asBot) {
       }
     }
 
-    const joined = await battles.join({ uid, user, asBot });
+    const joined = await battles.join({ uid, user, asBot, viewerId });
     if (joined.error) {
-      return res.status(joined.error === 'NOT_FOUND' ? 404 : 409)
-        .json({ status: "error", code: joined.error, message: joined.message });
+      const code = joined.error === 'NOT_FOUND' ? 404 : joined.error === 'FORBIDDEN' ? 403 : 409;
+      return res.status(code).json({ status: "error", code: joined.error, message: joined.message });
     }
 
     if (!asBot) {
@@ -1919,7 +2020,7 @@ async function joinBattle(req, res, asBot) {
       }
     }
 
-    const battle = await battles.getByUid(uid, { withDrops: true });
+    const battle = await battles.getByUid(uid, { withDrops: true, viewerId });
     res.json({ status: "success", data: { success: true, battle, result } });
   } catch (e) {
     console.error('POST /battles/join:', e);
@@ -1931,7 +2032,7 @@ app.post(['/api/v1/battles/:uid/join'], (req, res) => joinBattle(req, res, false
 app.post(['/api/v1/battles/:uid/add-bot'], (req, res) => joinBattle(req, res, true));
 
 app.post('/api/v1/battles/:uid/recreate', async (req, res) => {
-  const src = await battles.getByUid(req.params.uid);
+  const src = await battles.getByUid(req.params.uid, { viewerId: await viewerIdOf(req) });
   if (!src) return res.status(404).json({ status: "error", code: "NOT_FOUND", message: "Замес не найден" });
   req.body = {
     caseIds: src.cases.map(c => c.slug),

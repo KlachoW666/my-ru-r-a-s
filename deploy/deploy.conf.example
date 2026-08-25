@@ -1,0 +1,19 @@
+# Настройки update.sh. Скопировать в deploy/deploy.conf и поправить под сервер.
+# Файл не обязателен: без него берутся значения по умолчанию из скрипта.
+# deploy.conf в .gitignore — он про конкретную машину, а не про проект.
+
+# Ветка и remote, откуда обновляемся
+BRANCH=main
+REMOTE=origin
+
+# Имена сервисов. Для systemd — без .service, для pm2 — имя процесса.
+SITE_SERVICE=titanrust
+ADMIN_SERVICE=titanrust-admin
+
+# Куда складывать копии базы и сколько штук хранить
+BACKUP_DIR=/var/backups/titanrust
+KEEP_BACKUPS=10
+
+# Сколько ждать ответа сервисов после запуска: попыток × секунд
+HEALTH_RETRIES=20
+HEALTH_DELAY=1

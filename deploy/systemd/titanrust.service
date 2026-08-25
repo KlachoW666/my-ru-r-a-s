@@ -1,0 +1,39 @@
+[Unit]
+Description=titanrust.ru — игровой сервер (API, WebSocket, SPA)
+Documentation=https://github.com/KlachoW666/my-ru-r-a-s
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=simple
+User=titanrust
+Group=titanrust
+WorkingDirectory=/var/www/titanrust
+ExecStart=/usr/bin/node server.js
+
+# .env читается самим приложением через process.loadEnvFile(), но
+# NODE_ENV нужен до этого: от него зависят Secure-cookie, отключение
+# мокового профиля и запрет небезопасного JWT_SECRET.
+Environment=NODE_ENV=production
+
+Restart=always
+RestartSec=3
+# Каталог за минуту не должен перезапускаться бесконечно: если падает
+# на старте, лучше остановиться и оставить это в логе.
+StartLimitIntervalSec=60
+StartLimitBurst=5
+
+StandardOutput=journal
+StandardError=journal
+SyslogIdentifier=titanrust
+
+# Права по минимуму. Писать разрешено только туда, куда приложение
+# действительно пишет: база, загрузки через админку и кэш каталога.
+NoNewPrivileges=true
+PrivateTmp=true
+ProtectSystem=strict
+ProtectHome=true
+ReadWritePaths=/var/www/titanrust/admin.titanrust.ru/server /var/www/titanrust/public/uploads /var/www/titanrust/data /var/www/titanrust/backups
+
+[Install]
+WantedBy=multi-user.target

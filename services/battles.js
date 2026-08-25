@@ -139,28 +139,95 @@ function makeBattlesService({ queryAdminDb, getAdminDb, getCaseItemsFromDb, getF
     return dto;
   }
 
-  async function list({ status } = {}) {
+  /**
+   * Общий список замесов.
+   *
+   * Приватные замесы сюда не попадают — в этом и состоит их приватность.
+   * Раньше флаг `is_private` только сохранялся: замес с ним висел в общем
+   * лобби, любой видел его uid и заходил как в обычный. Единственный способ
+   * попасть в приватный замес — ссылка вида /crate-pvp/<uid>, а uid у таких
+   * замесов длиннее и по нему не переберёшь (см. create).
+   *
+   * Исключение — сам создатель и уже вошедшие игроки: им свой замес в лобби
+   * видеть надо, иначе после создания он пропадает с глаз.
+   */
+  async function list({ status, viewerId } = {}) {
     await ensureSchema();
-    const where = status && status !== 'all' ? `WHERE status = ?` : '';
+    const viewer = viewerId != null && viewerId !== '' ? String(viewerId) : null;
+
+    const where = [];
+    const params = [];
+
+    if (viewer) {
+      where.push(`(b.is_private = 0 OR b.is_private IS NULL
+                   OR b.creator_id = ?
+                   OR EXISTS (SELECT 1 FROM battle_players p
+                              WHERE p.battle_id = b.id AND p.user_id = ?))`);
+      params.push(viewer, viewer);
+    } else {
+      where.push(`(b.is_private = 0 OR b.is_private IS NULL)`);
+    }
+    if (status && status !== 'all') {
+      where.push(`b.status = ?`);
+      params.push(status);
+    }
+
     const rows = await queryAdminDb(
-      `SELECT * FROM battles ${where} ORDER BY
-         CASE status WHEN 'waiting' THEN 0 WHEN 'running' THEN 1 ELSE 2 END,
-         created_at DESC LIMIT 50`,
-      status && status !== 'all' ? [status] : []);
+      `SELECT b.* FROM battles b WHERE ${where.join(' AND ')} ORDER BY
+         CASE b.status WHEN 'waiting' THEN 0 WHEN 'running' THEN 1 ELSE 2 END,
+         b.created_at DESC LIMIT 50`, params);
     return Promise.all(rows.map(r => toDto(r)));
   }
 
-  async function getByUid(uid, opts) {
+  /** Строка замеса без DTO — для проверок доступа. */
+  async function findRow(uid) {
     await ensureSchema();
     const rows = await queryAdminDb(`SELECT * FROM battles WHERE uid = ?`, [uid]);
-    return rows[0] ? toDto(rows[0], opts) : null;
+    return rows[0] || null;
+  }
+
+  /**
+   * Можно ли этому зрителю открывать замес.
+   *
+   * Приватный замес открывается только по ссылке: uid и есть пропуск, и он
+   * не показывается никому лишнему, потому что в лобби такой замес не выводится.
+   * Создателю и участникам вход открыт всегда — на случай, если ссылку они
+   * потеряли, а замес видят у себя в лобби.
+   */
+  async function canView(b, viewerId) {
+    if (!b) return { allowed: false, error: 'NOT_FOUND', message: 'Замес не найден' };
+    if (b.is_private !== 1) return { allowed: true, reason: 'public' };
+
+    const viewer = viewerId != null && viewerId !== '' ? String(viewerId) : null;
+    if (viewer && String(b.creator_id) === viewer) return { allowed: true, reason: 'creator' };
+    if (viewer) {
+      const mine = await queryAdminDb(
+        `SELECT 1 FROM battle_players WHERE battle_id = ? AND user_id = ? LIMIT 1`, [b.id, viewer]);
+      if (mine.length) return { allowed: true, reason: 'player' };
+    }
+    // Дошёл сюда — значит знает uid, то есть пришёл по ссылке.
+    return { allowed: true, reason: 'link' };
+  }
+
+  async function getByUid(uid, opts = {}) {
+    await ensureSchema();
+    const b = await findRow(uid);
+    if (!b) return null;
+    const verdict = await canView(b, opts.viewerId);
+    if (!verdict.allowed) return null;
+    const dto = await toDto(b, opts);
+    dto.accessedBy = verdict.reason;
+    return dto;
   }
 
   // --- Создание и вход ------------------------------------------------------
 
   async function create({ user, caseSlugs, rounds, maxPlayers, isPrivate, price }) {
     await ensureSchema();
-    const uid = crypto.randomBytes(6).toString('hex');
+    // У приватного замеса uid — это и есть пропуск: он уходит в ссылку
+    // /crate-pvp/<uid> и больше нигде не показывается. Шести байт для пропуска
+    // мало, поэтому берём шестнадцать; у публичных всё как было.
+    const uid = crypto.randomBytes(isPrivate ? 16 : 6).toString('hex');
     const { serverSeed } = newServerSeed();
     const countRow = await queryAdminDb(`SELECT COUNT(*) AS c FROM battles`);
     const num = (countRow[0]?.c || 0) + 1;
@@ -178,14 +245,20 @@ function makeBattlesService({ queryAdminDb, getAdminDb, getCaseItemsFromDb, getF
        VALUES (?, 0, ?, ?, ?, 0)`,
       [r.lastID, String(user.id), user.username, user.avatar]);
 
-    return { uid, battleId: uid, id: r.lastID };
+    return { uid, battleId: uid, id: r.lastID, isPrivate: !!isPrivate };
   }
 
-  async function join({ uid, user, asBot = false }) {
+  async function join({ uid, user, asBot = false, viewerId }) {
     await ensureSchema();
-    const rows = await queryAdminDb(`SELECT * FROM battles WHERE uid = ?`, [uid]);
-    const b = rows[0];
+    const b = await findRow(uid);
     if (!b) return { error: 'NOT_FOUND', message: 'Замес не найден' };
+
+    // Приватный замес не отдаётся списком, поэтому сюда попадают только те,
+    // у кого есть ссылка. Проверку всё равно делаем: список — не единственная
+    // дверь, и следующий роут может прийти откуда угодно.
+    const verdict = await canView(b, viewerId != null ? viewerId : user?.id);
+    if (!verdict.allowed) return { error: 'FORBIDDEN', message: 'Замес приватный — нужна ссылка от создателя' };
+
     if (b.status !== 'waiting') return { error: 'ALREADY_STARTED', message: 'Замес уже начался' };
 
     const players = await queryAdminDb(`SELECT * FROM battle_players WHERE battle_id = ?`, [b.id]);
@@ -278,7 +351,7 @@ function makeBattlesService({ queryAdminDb, getAdminDb, getCaseItemsFromDb, getF
     };
   }
 
-  return { ensureSchema, list, getByUid, create, join, play, loadCases };
+  return { ensureSchema, list, getByUid, findRow, canView, create, join, play, loadCases };
 }
 
 module.exports = { makeBattlesService };

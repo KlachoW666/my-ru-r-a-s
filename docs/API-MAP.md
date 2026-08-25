@@ -54,7 +54,7 @@
 | GET | `/api/v1/giveaways/active-mega` | [728](../server.js:728) | 🔀 |
 | GET | `/api/v1/giveaway`, `/giveaways` | [744](../server.js:744) | 🎭 |
 | POST | `/api/v1/giveaways/:id/join` | [761](../server.js:761) | 🎭 |
-| GET | `/api/v1/crate-pvp`, `/battles` | [766](../server.js:766) | 🔀 |
+| GET | `/api/v1/crate-pvp`, `/battles` | [766](../server.js:766) | 🔀 приватные замесы в список не попадают |
 | POST | `/api/v1/battles/create` | [785](../server.js:785) | 🎭 |
 | POST | `/api/v1/battles/:id/join`, `/add-bot` | [800](../server.js:800) | 🎭 |
 | GET | `/api/v1/promo/active` | [649](../server.js:649) | 🎭 |
@@ -90,7 +90,21 @@ app.use('/api/v1', (req, res) => res.json({ status: "success", data: [] }));  //
 
 ## Сервер админки — [admin.titanrust.ru/server/server.js](../admin.titanrust.ru/server/server.js), порт 8080
 
-Все `/api/v1/admin/*` обёрнуты в `requireAdminJWT`, который **ничего не проверяет** ([:216](../admin.titanrust.ru/server/server.js:216)).
+Все `/api/v1/admin/*` обёрнуты в `requireAdminJWT`. Он делает две вещи: проверяет токен (только при `ADMIN_REQUIRE_AUTH=1`) и **проверяет права роли** по раскладке из [adminAccess.js](../admin.titanrust.ru/server/adminAccess.js) — всегда, даже при выключенной проверке токена. Отказ по правам — 403 с полями `role`, `domain`, `required`, `granted`; отказ по токену — 401.
+
+При `ADMIN_REQUIRE_AUTH=0` роль берётся из `ADMIN_DEV_ROLE` (по умолчанию `SUPER_ADMIN`), поэтому обычный локальный запуск ведёт себя как раньше. Роли и домены описаны в [ADMIN.md](ADMIN.md#права-доступа).
+
+| Метод | Путь | Что делает |
+|---|---|---|
+| GET | `/admin/auth/me` | профиль с настоящей ролью, `permissions` и картой `access` |
+| GET | `/admin/auth/roles`, `/admin/admins/roles` | справочник ролей с их правами |
+| GET | `/admin/admins` | администраторы, роль и число passkey у каждого |
+| POST | `/admin/admins` | завести администратора (только `SUPER_ADMIN`) |
+| PUT/PATCH | `/admin/admins/:id` | сменить логин, почту или роль |
+| DELETE | `/admin/admins/:id` | удалить вместе с его passkey |
+| GET | `/admin/auth/passkeys` | ключи с привязкой к администратору и его ролью |
+
+`POST /admin/auth/register/options` принимает `username` — ключ привяжется к этому администратору и при входе получит его роль.
 
 ### Реально пишет в БД
 

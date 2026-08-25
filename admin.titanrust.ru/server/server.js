@@ -7,6 +7,7 @@ const jwt = require('jsonwebtoken');
 const sqlite3 = require('sqlite3').verbose();
 const https = require('https');
 const multer = require('multer');
+const access = require('./adminAccess');
 
 const app = express();
 // ADMIN_PORT, а не PORT: .env общий с игровым сервером, где PORT=3101.
@@ -31,7 +32,31 @@ const PUBLIC_DIR = path.join(__dirname, '..', 'public');
 const STEAM_RUST_APPID = 252490;
 const STEAM_IMAGE_BASE = "https://community.cloudflare.steamstatic.com/economy/image/";
 
-app.use(cors({ origin: true, credentials: true }));
+// За nginx: без этого req.protocol всегда 'http', а req.ip — адрес прокси,
+// а не посетителя. Игровой сервер это уже делает, админка отставала.
+app.set('trust proxy', 1);
+
+// На боевом домене отражать любой Origin нельзя. Список берём из ADMIN_ORIGINS —
+// той же переменной, что задаёт origin'ы для passkey: они обязаны совпадать,
+// иначе вход по ключу и запросы к API разойдутся.
+const CORS_ORIGINS = new Set(
+  String(process.env.ADMIN_ORIGINS ||
+    (process.env.NODE_ENV === 'production'
+      ? 'https://admin.titanrust.ru,https://titanrust.ru'
+      : 'http://localhost:8080,http://127.0.0.1:8080')
+  ).split(',').map(s => s.trim().replace(/\/+$/, '')).filter(Boolean)
+);
+
+app.use(cors({
+  origin: (origin, cb) => {
+    if (!origin) return cb(null, true);              // curl, серверные запросы
+    if (process.env.NODE_ENV !== 'production') return cb(null, true);
+    if (CORS_ORIGINS.has(origin.replace(/\/+$/, ''))) return cb(null, true);
+    console.warn(`[CORS] отклонён origin: ${origin}`);
+    return cb(null, false);
+  },
+  credentials: true
+}));
 app.use(express.json({ limit: '10mb' }));
 app.use(express.urlencoded({ extended: true }));
 
@@ -207,35 +232,63 @@ function generateAdminJWT(user) {
     return jwt.sign({
         userId: user.id || 1,
         username: user.username || 'SUPER_ADMIN',
-        role: user.role || 'SUPER_ADMIN',
+        // Роль кладём в токен уже нормализованной: она решает, что можно.
+        role: access.normalizeRole(user.role || 'SUPER_ADMIN'),
         email: user.email || 'admin@titanrust.ru',
         exp: Math.floor(Date.now() / 1000) + (30 * 24 * 60 * 60)
     }, JWT_SECRET);
 }
 
 // ADMIN_REQUIRE_AUTH=1 включает реальную проверку JWT.
-// По умолчанию выключено, чтобы не сломать текущий локальный вход по паспорту
-// (фронт админки ходит через WebAuthn, который здесь ещё не реализован).
-// Перед выкладкой на публичный домен ОБЯЗАТЕЛЬНО поставить 1.
+// По умолчанию выключено, чтобы не потерять доступ, пока не заведён ни один
+// passkey. Перед выкладкой на публичный домен ОБЯЗАТЕЛЬНО поставить 1.
 const REQUIRE_ADMIN_AUTH = process.env.ADMIN_REQUIRE_AUTH === '1';
 
+// Роль, от имени которой работает админка при выключенной проверке токена.
+// Нужна, чтобы ролевую модель можно было проверять локально, не заводя passkey.
+// По умолчанию SUPER_ADMIN — поведение при ADMIN_REQUIRE_AUTH=0 не меняется.
+const DEV_ROLE = access.normalizeRole(process.env.ADMIN_DEV_ROLE || 'SUPER_ADMIN');
+
+/**
+ * Аутентификация + проверка прав.
+ *
+ * Права проверяются здесь же, а не отдельным middleware: иначе новый роут,
+ * которому забыли повесить проверку, снова получил бы полный доступ.
+ * Раскладка «раздел -> домен -> уровень» живёт в adminAccess.js.
+ */
 function requireAdminJWT(req, res, next) {
     if (!REQUIRE_ADMIN_AUTH) {
-        req.user = { userId: 1, username: 'SUPER_ADMIN', role: 'SUPER_ADMIN' };
-        return next();
+        req.user = { userId: 1, username: 'SUPER_ADMIN', role: DEV_ROLE };
+    } else {
+        const header = req.headers.authorization || '';
+        const token = header.startsWith('Bearer ') ? header.slice(7) : null;
+        if (!token) {
+            return res.status(401).json({ success: false, message: 'Требуется авторизация администратора' });
+        }
+        try {
+            req.user = jwt.verify(token, JWT_SECRET);
+        } catch (e) {
+            return res.status(401).json({ success: false, message: 'Недействительный или истёкший токен' });
+        }
     }
 
-    const header = req.headers.authorization || '';
-    const token = header.startsWith('Bearer ') ? header.slice(7) : null;
-    if (!token) {
-        return res.status(401).json({ success: false, message: 'Требуется авторизация администратора' });
+    const verdict = access.check(req.user.role, req.method, req.path);
+    req.access = verdict;
+    req.user.role = verdict.role;
+    if (!verdict.allowed) {
+        console.log(`[Права] ${verdict.role} ${req.method} ${req.path} -> 403 (${verdict.domain}: нужно ${verdict.need}, есть ${verdict.have})`);
+        return res.status(403).json({
+            success: false,
+            code: 'FORBIDDEN',
+            message: verdict.message,
+            role: verdict.role,
+            section: verdict.section,
+            domain: verdict.domain,
+            required: verdict.need,
+            granted: verdict.have
+        });
     }
-    try {
-        req.user = jwt.verify(token, JWT_SECRET);
-        next();
-    } catch (e) {
-        res.status(401).json({ success: false, message: 'Недействительный или истёкший токен' });
-    }
+    next();
 }
 
 // =====================================================
@@ -288,7 +341,26 @@ app.get('/api/v1/admin/auth/refresh', (req, res) => {
 });
 
 app.get('/api/v1/admin/auth/me', requireAdminJWT, (req, res) => {
-    res.json({ success: true, data: { userId: 1, username: 'SUPER_ADMIN', role: 'SUPER_ADMIN', email: 'admin@titanrust.ru', permissions: ['*'] } });
+    // Раньше здесь был захардкоженный SUPER_ADMIN с permissions:['*'] — фронт
+    // рисовал все разделы кому угодно. Теперь отдаём настоящую роль из токена.
+    const role = access.normalizeRole(req.user?.role);
+    res.json({
+        success: true,
+        data: {
+            userId: req.user?.userId || 1,
+            username: req.user?.username || 'SUPER_ADMIN',
+            email: req.user?.email || 'admin@titanrust.ru',
+            role,
+            roleTitle: access.ROLES[role].title,
+            permissions: access.permissionListFor(role),
+            access: access.permissionsFor(role)
+        }
+    });
+});
+
+// Справочник ролей — для экрана управления администраторами.
+app.get('/api/v1/admin/auth/roles', requireAdminJWT, (req, res) => {
+    res.json({ success: true, data: access.roleCatalog(), items: access.roleCatalog() });
 });
 
 app.post('/api/v1/admin/auth/logout', (req, res) => {
