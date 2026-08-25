@@ -546,11 +546,76 @@ function makeAdminRoutes({ app, dbAll, dbGet, dbRun, requireAdminJWT }) {
   });
 
   // Депозиты — берём из транзакций.
+  // Пополнения. Раньше здесь показывались уже начисленные транзакции — то есть
+  // только следствие. Теперь видны сами заявки, включая ждущие подтверждения:
+  // без этого экрана подтверждать оплату было бы негде.
   app.get('/api/v1/admin/wallet/deposits', requireAdminJWT, async (req, res) => {
+    const status = req.query.status;
+    const where = status && status !== 'all' ? ` WHERE d.status = ?` : '';
     const rows = await dbAll(
-      `SELECT t.*, u.username FROM transactions t LEFT JOIN users u ON u.id = t.user_id
-       WHERE t.type = 'deposit' ORDER BY t.id DESC LIMIT 200`).catch(() => []);
-    res.json({ success: true, data: rows, items: rows, total: rows.length });
+      `SELECT d.*, u.username AS user_name, u.balance AS user_balance
+         FROM deposits d LEFT JOIN users u ON u.id = d.user_id
+         ${where} ORDER BY d.id DESC LIMIT 200`,
+      status && status !== 'all' ? [status] : []).catch(() => []);
+
+    const totals = await dbGet(
+      `SELECT COUNT(*) AS pending, COALESCE(SUM(amount), 0) AS pendingSum
+         FROM deposits WHERE status = 'pending'`).catch(() => ({ pending: 0, pendingSum: 0 }));
+
+    res.json({
+      success: true, data: rows, items: rows, total: rows.length,
+      pending: totals?.pending || 0, pendingSum: totals?.pendingSum || 0
+    });
+  });
+
+  /**
+   * Подтверждение и отклонение заявки.
+   *
+   * Единственное место, где пополнение превращается в деньги на балансе.
+   * Порядок операций: сначала переводим заявку из pending, и только если
+   * строка действительно поменялась — трогаем баланс. При двойном клике или
+   * двух администраторах разом второй UPDATE не найдёт pending и вернёт
+   * changes = 0, так что дважды никто не начислит.
+   */
+  app.post('/api/v1/admin/wallet/deposits/:uid/:decision(approve|reject)', requireAdminJWT, async (req, res) => {
+    try {
+      const { uid, decision } = req.params;
+      const row = await dbGet(`SELECT * FROM deposits WHERE uid = ?`, [uid]);
+      if (!row) return bad(res, 'Заявка не найдена', 404);
+      if (row.status !== 'pending') {
+        return bad(res, `Заявка уже в статусе «${row.status}»`, 409);
+      }
+
+      if (decision === 'reject') {
+        await dbRun(
+          `UPDATE deposits SET status = 'rejected', settled_at = CURRENT_TIMESTAMP, settled_by = ?, comment = ?
+            WHERE uid = ? AND status = 'pending'`,
+          [req.user?.username || 'admin', req.body?.comment || 'Отклонено', uid]);
+        console.log(`[Пополнение] ${req.user?.username} отклонил заявку ${uid}`);
+        return ok(res, await dbGet(`SELECT * FROM deposits WHERE uid = ?`, [uid]));
+      }
+
+      // Сумму можно поправить: на крипте пришло не ровно столько, сколько ждали.
+      const credited = Number(req.body?.amount != null ? req.body.amount : row.amount) || 0;
+      if (credited <= 0) return bad(res, 'Некорректная сумма зачисления');
+
+      const upd = await dbRun(
+        `UPDATE deposits SET status = 'paid', credited = ?, settled_at = CURRENT_TIMESTAMP, settled_by = ?
+          WHERE uid = ? AND status = 'pending'`,
+        [credited, req.user?.username || 'admin', uid]);
+      if (!upd.changes) return bad(res, 'Заявку уже обработали', 409);
+
+      const u = await dbGet(`SELECT balance FROM users WHERE id = ?`, [row.user_id]);
+      const next = Math.max(0, +((Number(u?.balance) || 0) + credited).toFixed(2));
+      await dbRun(`UPDATE users SET balance = ? WHERE id = ?`, [next, row.user_id]);
+      await dbRun(
+        `INSERT INTO transactions (user_id, type, amount, comment) VALUES (?, 'deposit', ?, ?)`,
+        [row.user_id, credited, `Пополнение ${row.method}${row.asset ? ' ' + row.asset : ''} №${uid}`]
+      ).catch(() => {});
+
+      console.log(`[Пополнение] ${req.user?.username} подтвердил ${uid}: +${credited} ₽ игроку ${row.user_id}`);
+      ok(res, { ...(await dbGet(`SELECT * FROM deposits WHERE uid = ?`, [uid])), newBalance: next });
+    } catch (e) { bad(res, e.message, 500); }
   });
 
   /** Сводка по деньгам — считается из реальных таблиц, а не выдумывается. */

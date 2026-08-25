@@ -42,6 +42,7 @@ const {
 const { cleanDanglingCaseItems, getCaseHealth, getBrokenCases, MAX_RTP } = require('./services/caseHealth');
 const { verifyMailer } = require('./services/mailer');
 const { makeBattlesService } = require('./services/battles');
+const { makeDepositsService } = require('./services/deposits');
 const { makeGiveawaysService } = require('./services/giveaways');
 const { makeInventoryService } = require('./services/inventory');
 const { makeFairnessService } = require('./services/fairness');
@@ -518,6 +519,10 @@ const fairness = makeFairnessService({ queryAdminDb, getAdminDb });
 const battles = makeBattlesService({
   queryAdminDb, getAdminDb, getCaseItemsFromDb, getFallbackItems, fixImageUrl
 });
+
+// Заявки на пополнение. Начисление живёт только внутри confirm() — так деньги
+// не могут появиться в обход подтверждения.
+const deposits = makeDepositsService({ queryAdminDb, getAdminDb, adjustBalanceById });
 const giveaways = makeGiveawaysService({
   queryAdminDb, getAdminDb, queryItems, adjustBalanceById, fixImageUrl
 });
@@ -2146,23 +2151,74 @@ app.get('/api/v1/wallet/transactions', async (req, res) => {
   });
 });
 
+/**
+ * Заявка на пополнение.
+ *
+ * Раньше этот роут НАЧИСЛЯЛ деньги сразу, ничего не проверяя: провайдера нет,
+ * оплаты не происходит, а баланс рос. Любой вошедший игрок мог выписать себе
+ * до 500 000 ₽ одним запросом и повторять сколько угодно.
+ *
+ * Теперь создаётся заявка со статусом pending. Деньги начисляет только
+ * deposits.confirm() — из админки либо из вебхука провайдера, когда он
+ * появится. Других путей к балансу отсюда нет.
+ */
 app.post(['/api/v1/wallet/deposit/card', '/api/v1/wallet/deposit'], async (req, res) => {
-  const amount = Math.round(Number(req.body.amount) || 500);
-  if (amount <= 0 || amount > 500000) {
-    return res.status(400).json({ status: 'error', message: 'Некорректная сумма пополнения' });
+  const user = (await currentUser(req, mockUser)) || guestUser();
+  if (user.isGuest) {
+    return res.status(401).json({ status: 'error', code: 'UNAUTHORIZED', message: 'Нужна авторизация' });
   }
-  // Платёжного провайдера нет — зачисляем сразу. Реальная интеграция должна
-  // зачислять только по вебхуку об успешной оплате.
-  const newBalance = await adjustBalance(req, mockUser, amount);
-  await recordTransaction(req, 'deposit', amount, 'Пополнение картой');
+
+  const amount = Math.round(Number(req.body?.amount) || 0);
+  const limits = await adminSetting('wallet_config', {});
+  const min = Number(limits.minDeposit ?? 100);
+  const max = Number(limits.maxDeposit ?? 150000);
+  if (!Number.isFinite(amount) || amount < min || amount > max) {
+    return res.status(400).json({
+      status: 'error', code: 'BAD_AMOUNT',
+      message: `Сумма пополнения — от ${min} до ${max} ₽`
+    });
+  }
+
+  const method = String(req.body?.method || req.body?.paymentMethod || 'card');
+  const deposit = await deposits.create({
+    user, method, amount,
+    phone: req.body?.phone || null,
+    promo: req.body?.promoCode || req.body?.promo || null
+  });
+  if (!deposit) {
+    return res.status(500).json({ status: 'error', message: 'Не удалось создать заявку' });
+  }
+
+  console.log(`[Пополнение] Заявка ${deposit.uid}: ${user.username} на ${amount} ₽ (${method})`);
+
+  // url фронт открывает как платёжную страницу. Провайдера нет, поэтому
+  // возвращаем свою же страницу кошелька: заявка ждёт подтверждения.
   res.json({
     status: 'success',
     data: {
-      url: `${PUBLIC_URL}/wallet`,
-      newBalance,
-      balance: newBalance,
-      message: `Пополнение на ${amount} ₽ прошло успешно`
+      ...deposit,
+      url: `${PUBLIC_URL}/wallet?deposit=${deposit.uid}`,
+      paymentUrl: `${PUBLIC_URL}/wallet?deposit=${deposit.uid}`,
+      message: 'Заявка создана и ждёт подтверждения оплаты'
     }
+  });
+});
+
+/** Опрос статуса заявки. Фронт зовёт это после создания. */
+app.post(['/api/v1/wallet/deposit/card/status', '/api/v1/wallet/deposit/status'], async (req, res) => {
+  const user = (await currentUser(req, mockUser)) || guestUser();
+  if (user.isGuest) {
+    return res.status(401).json({ status: 'error', code: 'UNAUTHORIZED', message: 'Нужна авторизация' });
+  }
+  const uid = String(req.body?.id || req.body?.depositId || req.body?.uid || '');
+  const row = await deposits.forUser(uid, user.id);
+  if (!row) {
+    return res.status(404).json({ status: 'error', code: 'NOT_FOUND', message: 'Заявка не найдена' });
+  }
+  const dto = deposits.toDto(row);
+  res.json({
+    status: 'success',
+    data: { ...dto, paid: dto.status === 'paid', balance: await getBalance(req, mockUser) }
   });
 });
 
