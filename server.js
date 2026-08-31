@@ -43,6 +43,7 @@ const { cleanDanglingCaseItems, getCaseHealth, getBrokenCases, MAX_RTP } = requi
 const { verifyMailer } = require('./services/mailer');
 const { makeBattlesService } = require('./services/battles');
 const { makeDepositsService } = require('./services/deposits');
+const rollypay = require('./services/rollypay');
 const { makeGiveawaysService } = require('./services/giveaways');
 const { makeInventoryService } = require('./services/inventory');
 const { makeFairnessService } = require('./services/fairness');
@@ -173,7 +174,12 @@ app.use(cors({
   },
   credentials: true
 }));
-app.use(express.json());
+// Сырое тело сохраняем рядом с разобранным: подпись вебхука RollyPay считается
+// от тела ДО разбора, и JSON.stringify(req.body) её уже не воспроизведёт —
+// порядок ключей и пробелы после парсинга не те.
+app.use(express.json({
+  verify: (req, _res, buf) => { req.rawBody = buf; }
+}));
 
 // Разбор Bearer-токена ДО объявления всех роутов.
 // Express применяет middleware только к тому, что объявлено ПОСЛЕ него, а
@@ -2191,8 +2197,40 @@ app.post(['/api/v1/wallet/deposit/card', '/api/v1/wallet/deposit'], async (req, 
 
   console.log(`[Пополнение] Заявка ${deposit.uid}: ${user.username} на ${amount} ₽ (${method})`);
 
-  // url фронт открывает как платёжную страницу. Провайдера нет, поэтому
-  // возвращаем свою же страницу кошелька: заявка ждёт подтверждения.
+  // Шлюз настроен — заводим платёж и уводим игрока на его форму.
+  // order_id это наш uid: по нему вебхук найдёт заявку обратно.
+  if (rollypay.isConfigured()) {
+    const pay = await rollypay.createPayment({
+      orderId: deposit.uid,
+      amount,
+      method,
+      customerId: user.id,
+      successUrl: `${PUBLIC_URL}/wallet?deposit=${deposit.uid}&result=success`,
+      failUrl: `${PUBLIC_URL}/wallet?deposit=${deposit.uid}&result=fail`,
+      metadata: { userId: String(user.id), username: user.username }
+    });
+
+    if (!pay.ok) {
+      // Заявку не бросаем: пусть останется в админке как след неудачи.
+      await deposits.markFailed(deposit.uid, pay.message || 'Шлюз недоступен');
+      return res.status(502).json({
+        status: 'error', code: 'GATEWAY',
+        message: 'Платёжный шлюз недоступен, попробуйте позже'
+      });
+    }
+
+    await deposits.attachProvider(deposit.uid, 'rollypay', pay.paymentId);
+    return res.json({
+      status: 'success',
+      data: {
+        ...deposit, provider: 'rollypay', providerRef: pay.paymentId,
+        url: pay.payUrl, paymentUrl: pay.payUrl, payUrl: pay.payUrl,
+        message: 'Перейдите к оплате'
+      }
+    });
+  }
+
+  // Шлюза нет — заявка ждёт подтверждения администратором.
   res.json({
     status: 'success',
     data: {
@@ -2202,6 +2240,60 @@ app.post(['/api/v1/wallet/deposit/card', '/api/v1/wallet/deposit'], async (req, 
       message: 'Заявка создана и ждёт подтверждения оплаты'
     }
   });
+});
+
+/**
+ * Вебхук RollyPay.
+ *
+ * Подпись считается от `timestamp + "." + сырое тело` ключом signing_secret.
+ * Отвечать надо 2xx в течение 10 секунд, иначе шлюз повторит доставку — до
+ * восьми раз с нарастающей паузой. Поэтому на любое уже обработанное событие
+ * отвечаем 200: повтор не должен выглядеть отказом.
+ *
+ * Начисление идемпотентно само по себе (deposits.confirm переводит заявку из
+ * pending одним UPDATE), так что восемь повторов одного платежа дадут деньги
+ * ровно один раз.
+ */
+app.post(['/api/v1/wallet/deposit/rollypay/callback', '/api/v1/payments/callback'], async (req, res) => {
+  const verdict = rollypay.verifyWebhook({
+    rawBody: req.rawBody,
+    signature: req.headers['x-signature'],
+    timestamp: req.headers['x-timestamp']
+  });
+  if (!verdict.ok) {
+    console.warn(`[RollyPay] вебхук отклонён: ${verdict.reason}`);
+    return res.status(401).json({ status: 'error', message: 'Подпись не подтверждена' });
+  }
+
+  const body = req.body || {};
+  const event = String(body.event_type || '');
+  const orderId = String(body.order_id || '');
+  console.log(`[RollyPay] ${event} по заявке ${orderId}, статус ${body.status}`);
+
+  if (!orderId) return res.json({ status: 'success', ignored: 'нет order_id' });
+
+  if (event === 'payment.paid' || body.status === 'paid') {
+    const r = await deposits.confirm(orderId, {
+      by: 'rollypay',
+      providerRef: body.payment_id || null,
+      // Сумму берём свою, из заявки: шлюз удерживает комиссию из платежа,
+      // и в вебхуке может прийти уже за её вычетом. Игрок заплатил столько,
+      // сколько заказывал, — столько и получает.
+      amount: null
+    });
+    if (r.ok) console.log(`[RollyPay] заявка ${orderId} оплачена, начислено ${r.credited} ₽`);
+    else console.log(`[RollyPay] заявка ${orderId}: ${r.message}`);
+    // 200 в любом случае — повтор доставки нам не нужен.
+    return res.json({ status: 'success' });
+  }
+
+  if (['payment.canceled', 'payment.expired'].includes(event)) {
+    await deposits.reject(orderId, { by: 'rollypay', comment: `Шлюз: ${event}` });
+    return res.json({ status: 'success' });
+  }
+
+  // Остальные события просто подтверждаем.
+  res.json({ status: 'success' });
 });
 
 /** Опрос статуса заявки. Фронт зовёт это после создания. */

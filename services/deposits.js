@@ -12,7 +12,7 @@
  * Баланс меняется ровно в одном месте — confirm(), — и только один раз:
  * повторное подтверждение той же заявки денег не добавляет.
  *
- * Схема состояний: pending -> paid | rejected | expired
+ * Схема состояний: pending -> paid | rejected | expired | failed
  *
  * Провайдер платежей подключается сюда же: его вебхук зовёт confirm() с
  * внешним идентификатором платежа. Пока провайдера нет, заявки подтверждает
@@ -183,7 +183,27 @@ function makeDepositsService({ queryAdminDb, getAdminDb, adjustBalanceById }) {
     return r ? r.changes : 0;
   }
 
-  return { ensureSchema, create, byUid, forUser, listForUser, confirm, reject, expireStale, toDto, TTL_MINUTES };
+  /** Привязать заявку к платежу шлюза — по нему потом придёт вебхук. */
+  async function attachProvider(uid, provider, providerRef) {
+    await run(`UPDATE deposits SET provider = ?, provider_ref = ? WHERE uid = ?`,
+      [provider, providerRef || null, uid]);
+    return toDto(await byUid(uid));
+  }
+
+  /**
+   * Шлюз не принял платёж. Заявку не удаляем: пусть останется в админке
+   * следом неудачи, иначе такие случаи расследовать будет нечем.
+   */
+  async function markFailed(uid, comment) {
+    await run(
+      `UPDATE deposits SET status = 'failed', comment = ?, settled_at = CURRENT_TIMESTAMP, settled_by = 'gateway'
+        WHERE uid = ? AND status = 'pending'`,
+      [String(comment || 'Шлюз недоступен').slice(0, 300), uid]);
+    return toDto(await byUid(uid));
+  }
+
+  return { ensureSchema, create, byUid, forUser, listForUser, confirm, reject,
+           attachProvider, markFailed, expireStale, toDto, TTL_MINUTES };
 }
 
 module.exports = { makeDepositsService };
