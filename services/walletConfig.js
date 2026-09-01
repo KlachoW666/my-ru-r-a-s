@@ -98,6 +98,55 @@ function makeWalletConfig({ queryAdminDb, adminSetting }) {
     const depositMethods = depositRows.map(r => toMethod(r, 'deposit'));
     const withdrawMethods = withdrawRows.map(r => toMethod(r, 'withdraw'));
 
+    /*
+     * Крипто-вывод фронт разбирает по ПАРАМ «монета + сеть»
+     * (WalletPage-xHnuX8Qj.js):
+     *
+     *   coins          = уникальные asset среди методов category 'crypto'
+     *   networksByCoin = для каждой монеты список её network
+     *
+     * То есть у каждого метода обязаны быть поля `asset` и `network`, причём
+     * сеть — из набора, который фронт считает известным: TRC20, ERC20, LTC.
+     * Метод без них молча пропускается, поэтому список монет выходил пустым
+     * и кошелёк нельзя было добавить вовсе.
+     *
+     * Одной строки в wallet_methods на всю крипту мало: USDT ходит и по
+     * TRC20, и по ERC20, а это два разных адреса. Поэтому строка разворачивается
+     * в пары.
+     */
+    const CRYPTO_PAIRS = [
+      { asset: 'USDT', network: 'TRC20', label: 'USDT TRC-20' },
+      { asset: 'USDT', network: 'ERC20', label: 'USDT ERC-20' },
+      { asset: 'ETH',  network: 'ERC20', label: 'Ethereum' },
+      { asset: 'LTC',  network: 'LTC',   label: 'Litecoin' }
+    ];
+
+    const cryptoRow = withdrawRows.find(r => categoryOf(r.code) === 'crypto');
+    if (cryptoRow) {
+      // Обобщённую строку заменяем парами: она сама по себе фронту бесполезна.
+      const idx = withdrawMethods.findIndex(m => m.category === 'crypto');
+      if (idx !== -1) withdrawMethods.splice(idx, 1);
+
+      for (const pair of CRYPTO_PAIRS) {
+        withdrawMethods.push({
+          id: `withdraw_${pair.asset}_${pair.network}`.toLowerCase(),
+          code: cryptoRow.code,
+          category: 'crypto',
+          enabled: cryptoRow.enabled !== 0,
+          label: pair.label,
+          icon: cryptoRow.icon || null,
+          asset: pair.asset,
+          network: pair.network,
+          providers: [pair.asset.toLowerCase()],
+          groupKey: '', variant: null, processor: 'INTERNAL',
+          amountCurrency: 'RUB', providerToRubRate: '1',
+          minAmount: Number(cryptoRow.min_amount) || 0,
+          maxAmount: Number(cryptoRow.max_amount) || 0,
+          feePercent: Number(cryptoRow.fee_percent) || 0
+        });
+      }
+    }
+
     // Вывод скинов идёт не через wallet_methods, а через инвентарь, но вкладка
     // «Rust скины» на фронте ищет способ с category 'skins'. Без него вкладка
     // висит пустой, хотя инвентарь работает.

@@ -2514,24 +2514,150 @@ app.post(['/api/v1/wallet/deposit/card/status', '/api/v1/wallet/deposit/status']
   });
 });
 
+/**
+ * Таблица заявок на вывод. Изначально в ней были только сумма и статус,
+ * поэтому в админке заявка выглядела строкой без монеты, сети и адреса —
+ * обработать такую невозможно. Недостающие колонки добавляются на месте.
+ */
+let withdrawSchemaReady = false;
+async function ensureWithdrawSchema() {
+  if (withdrawSchemaReady) return;
+  const cols = ['channel TEXT', 'method_id TEXT', 'asset TEXT', 'network TEXT',
+                'address TEXT', 'wallet_label TEXT', 'fee REAL DEFAULT 0',
+                'payout REAL DEFAULT 0', 'comment TEXT', 'settled_at TIMESTAMP',
+                'settled_by TEXT'];
+  for (const c of cols) {
+    await new Promise((resolve) => {
+      const db = getAdminDb(); if (!db) return resolve();
+      // ALTER падает, если колонка уже есть — это нормально, ошибку глушим.
+      db.run(`ALTER TABLE withdrawals ADD COLUMN ${c}`, () => { db.close(); resolve(); });
+    });
+  }
+  withdrawSchemaReady = true;
+}
+
+/** Комиссия и сумма к получению по выбранному способу. */
+async function withdrawQuote({ amount, methodId }) {
+  const cfg = await walletConfig.build({});
+  const method = cfg.withdraw.methods.find(m => m.id === methodId)
+    || cfg.withdraw.methods.find(m => m.category === 'crypto');
+  const feePercent = Number(method?.feePercent) || 0;
+  const fee = Math.round(amount * feePercent) / 100;
+  const payout = Math.max(0, Math.round((amount - fee) * 100) / 100);
+  const rate = Number(cfg.rates?.[method?.asset] || 0);
+  return {
+    method, feePercent, fee, payout,
+    // Сколько это в монете по текущему курсу — фронт показывает под суммой.
+    payoutCrypto: rate > 0 ? +(payout / rate).toFixed(8) : null,
+    asset: method?.asset || null,
+    network: method?.network || null,
+    rate
+  };
+}
+
+/**
+ * Предпросчёт вывода. Фронт зовёт его перед подтверждением, чтобы показать
+ * комиссию и сумму к получению. Без него кнопка вывода не активируется.
+ */
+app.post('/api/v1/wallet/withdraw/crypto/preview', async (req, res) => {
+  const user = (await currentUser(req, mockUser)) || guestUser();
+  if (user.isGuest) {
+    return res.status(401).json({ status: 'error', code: 'UNAUTHORIZED', message: 'Нужна авторизация' });
+  }
+  const amount = Math.round(Number(req.body?.amount) || 0);
+  if (amount <= 0) {
+    return res.status(400).json({ status: 'error', message: 'Некорректная сумма вывода' });
+  }
+  const q = await withdrawQuote({ amount, methodId: req.body?.withdraw_method_id });
+  res.json({
+    status: 'success',
+    data: {
+      amount, fee: q.fee, feePercent: q.feePercent,
+      receive: q.payout, payout: q.payout,
+      receiveCrypto: q.payoutCrypto, payoutCrypto: q.payoutCrypto,
+      asset: q.asset, network: q.network, rate: q.rate, currency: 'RUB'
+    }
+  });
+});
+
 app.post('/api/v1/wallet/withdraw', async (req, res) => {
-  const amount = Math.round(Number(req.body.amount) || 0);
-  if (amount <= 0) return res.status(400).json({ status: 'error', message: 'Некорректная сумма вывода' });
+  const user = (await currentUser(req, mockUser)) || guestUser();
+  if (user.isGuest) {
+    return res.status(401).json({ status: 'error', code: 'UNAUTHORIZED', message: 'Нужна авторизация' });
+  }
+
+  const body = req.body || {};
+  const channel = String(body.channel || 'CRYPTO').toUpperCase();
+  const amount = Math.round(Number(body.amount) || 0);
+  const limits = await adminSetting('wallet_config', {});
+  const min = Number(limits.minWithdraw ?? 500);
+
+  if (amount < min) {
+    return res.status(400).json({
+      status: 'error', code: 'AMOUNT_TOO_SMALL',
+      message: `Минимальная сумма вывода — ${min} ₽`
+    });
+  }
+
   const balance = await getBalance(req, mockUser);
   if (balance < amount) {
     return res.status(400).json({ status: 'error', code: 'INSUFFICIENT_BALANCE',
       message: `Недостаточно средств: на балансе ${balance} ₽` });
   }
-  const newBalance = await adjustBalance(req, mockUser, -amount);
-  await recordTransaction(req, 'withdraw', -amount, 'Заявка на вывод');
-  if (req.auth && !req.auth.mock) {
-    await new Promise((resolve) => {
-      const db = getAdminDb(); if (!db) return resolve();
-      db.run(`INSERT INTO withdrawals (user_id, amount, currency, status) VALUES (?, ?, 'RUB', 'pending')`,
-        [req.auth.sub, amount], () => { db.close(); resolve(); });
-    });
+
+  // Кошелёк игрока: из него берутся монета, сеть и адрес. Без него заявку
+  // в крипте обработать нельзя — некуда отправлять.
+  let wallet = null;
+  if (channel === 'CRYPTO') {
+    await ensureWalletsSchema();
+    const rows = await queryAdminDb(
+      `SELECT * FROM user_crypto_wallets WHERE id = ? AND user_id = ?`,
+      [body.crypto_wallet_id, user.id]);
+    wallet = rows[0] || null;
+    if (!wallet) {
+      return res.status(400).json({
+        status: 'error', code: 'WALLET_NOT_FOUND',
+        message: 'Кошелёк не найден. Добавьте его заново.'
+      });
+    }
   }
-  res.json({ status: 'success', data: { newBalance, balance: newBalance }, message: 'Заявка на вывод создана' });
+
+  const q = await withdrawQuote({ amount, methodId: body.withdraw_method_id });
+
+  await ensureWithdrawSchema();
+  const newBalance = await adjustBalance(req, mockUser, -amount);
+  await recordTransaction(req, 'withdraw', -amount,
+    channel === 'CRYPTO' ? `Вывод ${wallet?.asset || ''} ${wallet?.network || ''}`.trim() : 'Вывод скинов');
+
+  let requestId = null;
+  await new Promise((resolve) => {
+    const db = getAdminDb(); if (!db) return resolve();
+    db.run(
+      `INSERT INTO withdrawals (user_id, amount, currency, status, channel, method_id,
+                                asset, network, address, wallet_label, fee, payout)
+       VALUES (?, ?, 'RUB', 'pending', ?, ?, ?, ?, ?, ?, ?, ?)`,
+      [user.id, amount, channel, body.withdraw_method_id || null,
+       wallet?.asset || null, wallet?.network || null, wallet?.address || null,
+       wallet?.label || null, q.fee, q.payout],
+      function () { requestId = this.lastID; db.close(); resolve(); });
+  });
+
+  console.log(`[Вывод] Заявка №${requestId}: ${user.username}, ${amount} ₽ (${channel}` +
+    (wallet ? `, ${wallet.asset} ${wallet.network}` : '') + ')');
+
+  res.json({
+    status: 'success',
+    data: {
+      request_id: requestId, id: requestId,
+      amount, fee: q.fee, payout: q.payout,
+      asset: wallet?.asset || null, network: wallet?.network || null,
+      address: wallet?.address || null,
+      status: 'pending', channel,
+      newBalance, balance: newBalance,
+      needs_confirmation: false
+    },
+    message: 'Заявка на вывод создана и ждёт проверки'
+  });
 });
 
 // Wildcard API fallback
