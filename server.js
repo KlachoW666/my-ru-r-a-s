@@ -43,6 +43,7 @@ const { cleanDanglingCaseItems, getCaseHealth, getBrokenCases, MAX_RTP } = requi
 const { verifyMailer } = require('./services/mailer');
 const { makeBattlesService } = require('./services/battles');
 const { makeDepositsService } = require('./services/deposits');
+const { makeWalletConfig } = require('./services/walletConfig');
 const rollypay = require('./services/rollypay');
 const { makeGiveawaysService } = require('./services/giveaways');
 const { makeInventoryService } = require('./services/inventory');
@@ -529,6 +530,7 @@ const battles = makeBattlesService({
 // Заявки на пополнение. Начисление живёт только внутри confirm() — так деньги
 // не могут появиться в обход подтверждения.
 const deposits = makeDepositsService({ queryAdminDb, getAdminDb, adjustBalanceById });
+const walletConfig = makeWalletConfig({ queryAdminDb, adminSetting });
 const giveaways = makeGiveawaysService({
   queryAdminDb, getAdminDb, queryItems, adjustBalanceById, fixImageUrl
 });
@@ -2096,45 +2098,154 @@ app.post(['/api/v1/giveaways/:uid/join', '/api/v1/giveaway/:uid/join'], async (r
 
 app.get(['/api/v1/wallet', '/api/v1/wallet/config'], async (req, res) => {
   const balance = await getBalance(req, mockUser);
-  // Методы оплаты и лимиты — из таблиц админки, а не из констант.
-  const wallet = await cached('siteWallet', 30000, async () => {
-    const methods = await queryAdminDb(
-      `SELECT code, name, icon, kind, min_amount, max_amount, fee_percent
-       FROM wallet_methods WHERE enabled = 1 ORDER BY kind ASC, position ASC`);
-    const presets = await queryAdminDb(
-      `SELECT amount, bonus_percent FROM deposit_presets WHERE enabled = 1 ORDER BY position ASC`);
-    const limits = await adminSetting('wallet_config', {});
-    return { methods, presets, limits };
+  // Форма ответа снята со стора кошелька в бандле, см. services/walletConfig.js.
+  // Прежняя форма фронтом не читалась вовсе: список стран выходил пустым, а под
+  // ним висело «Для выбранной страны нет доступных способов пополнения».
+  const cfg = await cached(`walletCfg:${req.query.country || ''}`, 30000,
+    () => walletConfig.build({ country: req.query.country }));
+  res.json({ status: "success", data: { ...cfg, balance } });
+});
+
+/**
+ * Кошельки игрока для вывода в крипте.
+ *
+ * Вкладка «Вывод» без этих трёх ручек не рисуется: список уходит в catch-all,
+ * который отдаёт 200 и пустоту, и экран остаётся чёрным.
+ * Монета и сеть определяются по самому адресу — так же, как это подписано
+ * в интерфейсе: «кошелёк сам определяет монету и сеть».
+ */
+function detectAsset(address) {
+  const a = String(address || '').trim();
+  if (/^T[1-9A-HJ-NP-Za-km-z]{33}$/.test(a)) return { asset: 'USDT', network: 'TRC-20' };
+  if (/^0x[a-fA-F0-9]{40}$/.test(a)) return { asset: 'ETH', network: 'ERC-20' };
+  if (/^(ltc1|[LM])[a-zA-HJ-NP-Z0-9]{25,62}$/.test(a)) return { asset: 'LTC', network: 'Litecoin' };
+  if (/^(bc1|[13])[a-zA-HJ-NP-Z0-9]{25,62}$/.test(a)) return { asset: 'BTC', network: 'Bitcoin' };
+  return null;
+}
+
+async function ensureWalletsSchema() {
+  await new Promise((resolve) => {
+    const db = getAdminDb();
+    if (!db) return resolve();
+    db.run(`CREATE TABLE IF NOT EXISTS user_crypto_wallets (
+      id INTEGER PRIMARY KEY AUTOINCREMENT,
+      user_id INTEGER,
+      label TEXT,
+      address TEXT,
+      asset TEXT,
+      network TEXT,
+      created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
+    )`, () => { db.close(); resolve(); });
   });
-  if (wallet.methods.length) {
-    return res.json({
-      status: "success",
-      data: {
-        balance, currency: "RUB",
-        paymentMethods: wallet.methods
-          .filter(m => m.kind === 'deposit')
-          .map(m => ({ id: m.code, name: m.name, icon: m.icon, min: m.min_amount, max: m.max_amount, feePercent: m.fee_percent })),
-        withdrawMethods: wallet.methods
-          .filter(m => m.kind === 'withdraw')
-          .map(m => ({ id: m.code, name: m.name, icon: m.icon, min: m.min_amount, max: m.max_amount, feePercent: m.fee_percent })),
-        depositPresets: wallet.presets.map(p => ({ amount: p.amount, bonusPercent: p.bonus_percent })),
-        minDeposit: wallet.limits.minDeposit ?? 100,
-        maxDeposit: wallet.limits.maxDeposit ?? 150000,
-        minWithdraw: wallet.limits.minWithdraw ?? 500
-      }
+}
+
+app.get('/api/v1/wallet/crypto-wallets', async (req, res) => {
+  const user = (await currentUser(req, mockUser)) || guestUser();
+  if (user.isGuest) return res.json({ status: 'success', data: [] });
+  await ensureWalletsSchema();
+  const rows = await queryAdminDb(
+    `SELECT id, label, address, asset, network, created_at FROM user_crypto_wallets
+      WHERE user_id = ? ORDER BY id DESC`, [user.id]);
+  res.json({ status: 'success', data: rows });
+});
+
+app.post('/api/v1/wallet/crypto-wallets', async (req, res) => {
+  const user = (await currentUser(req, mockUser)) || guestUser();
+  if (user.isGuest) {
+    return res.status(401).json({ status: 'error', code: 'UNAUTHORIZED', message: 'Нужна авторизация' });
+  }
+  const address = String(req.body?.address || '').trim();
+  const detected = detectAsset(address);
+  if (!detected) {
+    return res.status(400).json({
+      status: 'error', code: 'BAD_ADDRESS',
+      message: 'Не удалось определить монету по адресу. Поддерживаются USDT (TRC-20), ETH, LTC и BTC'
     });
   }
+  await ensureWalletsSchema();
+  const dup = await queryAdminDb(
+    `SELECT id FROM user_crypto_wallets WHERE user_id = ? AND address = ?`, [user.id, address]);
+  if (dup.length) {
+    return res.status(409).json({ status: 'error', code: 'DUPLICATE', message: 'Такой кошелёк уже добавлен' });
+  }
+
+  const label = String(req.body?.label || '').trim() || `${detected.asset} ${address.slice(0, 6)}…${address.slice(-4)}`;
+  await new Promise((resolve) => {
+    const db = getAdminDb();
+    if (!db) return resolve();
+    db.run(`INSERT INTO user_crypto_wallets (user_id, label, address, asset, network) VALUES (?, ?, ?, ?, ?)`,
+      [user.id, label, address, detected.asset, detected.network], () => { db.close(); resolve(); });
+  });
+  const rows = await queryAdminDb(
+    `SELECT id, label, address, asset, network, created_at FROM user_crypto_wallets
+      WHERE user_id = ? ORDER BY id DESC LIMIT 1`, [user.id]);
+  res.json({ status: 'success', data: rows[0] || null });
+});
+
+app.delete('/api/v1/wallet/crypto-wallets/:id', async (req, res) => {
+  const user = (await currentUser(req, mockUser)) || guestUser();
+  if (user.isGuest) {
+    return res.status(401).json({ status: 'error', code: 'UNAUTHORIZED', message: 'Нужна авторизация' });
+  }
+  await ensureWalletsSchema();
+  // user_id в условии обязателен: иначе чужой кошелёк удалялся бы по номеру.
+  await new Promise((resolve) => {
+    const db = getAdminDb();
+    if (!db) return resolve();
+    db.run(`DELETE FROM user_crypto_wallets WHERE id = ? AND user_id = ?`,
+      [req.params.id, user.id], () => { db.close(); resolve(); });
+  });
+  res.json({ status: 'success', data: { deleted: req.params.id } });
+});
+
+/** Активные заявки на вывод в крипте. Пустой список — нормальный ответ. */
+app.get('/api/v1/wallet/crypto/withdrawals', async (req, res) => {
+  res.json({ status: 'success', data: [] });
+});
+
+/**
+ * Допуск к выводу и дневные лимиты.
+ *
+ * Фронт читает cap и remaining, чтобы показать «Доступно сегодня». Без ответа
+ * поля остаются пустыми и кнопка вывода не включается.
+ */
+app.get('/api/v1/wallet/eligibility', async (req, res) => {
+  const limits = await adminSetting('wallet_config', {});
+  const cap = Number(limits.dailyWithdrawCap ?? 27000);
+  const user = (await currentUser(req, mockUser)) || guestUser();
+
+  let spentToday = 0;
+  if (!user.isGuest) {
+    await ensureTxSchema();
+    const rows = await queryAdminDb(
+      `SELECT COALESCE(SUM(ABS(amount)), 0) AS s FROM transactions
+        WHERE user_id = ? AND type = 'withdraw' AND datetime(created_at) >= datetime('now', '-1 day')`,
+      [user.id]);
+    spentToday = rows.length ? Number(rows[0].s) || 0 : 0;
+  }
+  const remaining = Math.max(0, cap - spentToday);
+
   res.json({
-    status: "success",
+    status: 'success',
     data: {
-      balance,
-      currency: "RUB",
-      paymentMethods: [
-        { id: "card", name: "Банковская карта RUB", icon: "/assets/wallet/pm-cards.svg" },
-        { id: "sbp", name: "СБП", icon: "/assets/wallet/sbp.svg" },
-        { id: "crypto", name: "Криптовалюта (USDT / TON / BTC)", icon: "/assets/wallet/pm-crypto.svg" }
-      ]
+      allowed: !user.isGuest,
+      channels: {
+        SKINS: { cap, remaining, used: spentToday },
+        CRYPTO: { cap, remaining, used: spentToday }
+      },
+      cap, remaining, used: spentToday,
+      minWithdraw: Number(limits.minWithdraw ?? 500)
     }
+  });
+});
+
+/** Лимит расходов. Форма та же, отдельная ручка — так зовёт фронт. */
+app.get('/api/v1/wallet/expense-limit', async (req, res) => {
+  const limits = await adminSetting('wallet_config', {});
+  const cap = Number(limits.dailyWithdrawCap ?? 27000);
+  res.json({
+    status: 'success',
+    data: { cap, remaining: cap, used: 0, period: 'day', currency: 'RUB' }
   });
 });
 
