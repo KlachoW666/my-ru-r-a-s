@@ -323,6 +323,15 @@ fi
 # reset --hard, а не pull: на сервере правок быть не должно, а merge-конфликт
 # посреди обновления — худшее, что может случиться. Untracked-файлы
 # (загрузки через админку, база, .env) не трогаются: git clean мы не зовём.
+# Файлы, которые пишет само приложение, но которые пока отслеживаются git:
+# reset их удалит. Откладываем в сторону и вернём следом.
+RUNTIME_KEEP="$APP_DIR/data/skins.json"
+KEPT_TMP=""
+if [ "$DRY_RUN" = 0 ] && [ -f "$RUNTIME_KEEP" ]; then
+  KEPT_TMP="$(mktemp 2>/dev/null || echo "$APP_DIR/.skins-keep.tmp")"
+  cp "$RUNTIME_KEEP" "$KEPT_TMP"
+fi
+
 run git reset --hard "$REMOTE/$BRANCH"
 
 # На сервере со старого коммита база была отслеживаемой, и reset её удалил:
@@ -331,6 +340,12 @@ if [ "$DRY_RUN" = 0 ] && [ -n "${BACKUP_FILE:-}" ] && [ -f "$BACKUP_FILE" ] && [
   cp "$BACKUP_FILE" "$DB_PATH"
   info "база возвращена из копии — reset удалил её как отслеживаемый файл"
   info "больше это не повторится: теперь она вне git"
+fi
+
+# Кэш каталога: та же история, что с базой.
+if [ -n "$KEPT_TMP" ] && [ -f "$KEPT_TMP" ]; then
+  [ -f "$RUNTIME_KEEP" ] || { mkdir -p "$(dirname "$RUNTIME_KEEP")"; cp "$KEPT_TMP" "$RUNTIME_KEEP";     info "кэш каталога возвращён на место"; }
+  rm -f "$KEPT_TMP"
 fi
 
 # ---------------------------------------------------------------------------
