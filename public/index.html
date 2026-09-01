@@ -2,11 +2,13 @@
 <html lang="ru">
   <head>
     <meta charset="UTF-8" />
-    <link rel="icon" type="image/svg+xml" href="/logo-symbol.svg" />
-    <link rel="icon" type="image/png" href="/logo-symbol.png" />
+    <!-- SVG-варианта эмблемы нет, а браузер предпочёл бы его PNG-версии,
+         поэтому объявлены только растровые. -->
+    <link rel="icon" type="image/png" sizes="256x256" href="/logo-symbol.png" />
+    <link rel="icon" href="/favicon.ico" sizes="any" />
     <link rel="apple-touch-icon" href="/apple-touch-icon.png" />
     <meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover" />
-    <meta name="theme-color" content="#181614" />
+    <meta name="theme-color" content="#0e0e10" />
 
     <!-- Primary meta -->
     <meta
@@ -38,25 +40,17 @@
       property="og:description"
       content="Открывай кейсы Rust, крути апгрейдер, собирай скины. Кейс-баттлы, дропы и розыгрыши. Титан держит удар. Шансы честные, без бонусной мишуры."
     />
-    <meta property="og:image" content="https://titanrust.ru/logo-symbol.png" />
-    <meta property="og:image:width" content="256" />
-    <meta property="og:image:height" content="256" />
-    <meta property="og:image:type" content="image/png" />
+    <meta property="og:image" content="https://titanrust.ru/og-banner.jpg" />
+    <meta property="og:image:width" content="1200" />
+    <meta property="og:image:height" content="630" />
+    <meta property="og:image:type" content="image/jpeg" />
     <meta
       property="og:image:alt"
       content="TITAN RUST — платформа открытия кейсов Rust"
     />
-    <!-- TODO(seo): og:image is currently the 256×256 square logo (public/logo-symbol.png).
-         A real 1200×630 share banner is a design task (brand brief section 6). Once it
-         exists: point og:image/twitter:image/oembed.json at it, update the width/height
-         meta above, and switch twitter:card back to summary_large_image below. -->
 
     <!-- Twitter / X -->
-    <!-- TODO(seo): switch to "summary_large_image" once a real 1200×630 share banner
-         exists — the current image is a 256×256 square logo, which doesn't fit
-         summary_large_image's ~2:1 aspect ratio and gets cropped/misrendered;
-         "summary" renders a square image correctly. -->
-    <meta name="twitter:card" content="summary" />
+    <meta name="twitter:card" content="summary_large_image" />
     <!-- NOTE(seo): "twitter:site" omitted — no confirmed live X/Twitter handle yet
          (brand brief: only Telegram and VK are shown at launch). Add once a real,
          verified handle exists; a wrong @handle mis-attributes the card. -->
@@ -65,7 +59,7 @@
       name="twitter:description"
       content="Открывай кейсы Rust, крути апгрейдер, собирай скины. Кейс-баттлы, дропы и розыгрыши."
     />
-    <meta name="twitter:image" content="https://titanrust.ru/logo-symbol.png" />
+    <meta name="twitter:image" content="https://titanrust.ru/og-banner.jpg" />
 
     <!-- oEmbed -->
     <link
