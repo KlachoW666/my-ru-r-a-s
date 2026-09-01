@@ -1,0 +1,44 @@
+# TITAN RUST — titanrust.ru
+
+User-agent: *
+Allow: /
+
+# Личные и служебные разделы в индексе не нужны: они за авторизацией,
+# краулер увидит там только пустую оболочку и потратит бюджет обхода.
+Disallow: /profile
+Disallow: /wallet
+Disallow: /transactions
+Disallow: /api/
+Disallow: /*?deposit=
+Disallow: /*?result=
+
+# Приватные замесы открываются только по ссылке. Она же служит пропуском,
+# поэтому в поиск такие страницы попадать не должны.
+Disallow: /crate-pvp/
+
+# ИИ-краулеры пускаем осознанно: в index.html лежит <noscript>-блок с
+# осмысленным текстом и внутренними ссылками, и он для них полезен.
+User-agent: GPTBot
+Allow: /
+
+User-agent: ClaudeBot
+Allow: /
+
+User-agent: PerplexityBot
+Allow: /
+
+User-agent: YandexBot
+Allow: /
+
+# Сканеры цен и парсеры контента не нужны: каталог у нас живой,
+# а нагрузку они дают заметную.
+User-agent: SemrushBot
+Disallow: /
+
+User-agent: AhrefsBot
+Disallow: /
+
+User-agent: DotBot
+Disallow: /
+
+Sitemap: https://titanrust.ru/sitemap.xml

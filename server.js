@@ -2546,6 +2546,66 @@ app.use((req, res, next) => {
 });
 
 // SPA History Fallback (Return index.html with text/html header)
+/**
+ * Карта сайта.
+ *
+ * Собирается из базы, а не лежит файлом: кейсы заводят и архивируют в
+ * админке, и статический sitemap протух бы на второй неделе. Архивные и
+ * неактивные кейсы в карту не попадают — отправлять краулер на страницу,
+ * которую он не сможет открыть, значит тратить бюджет обхода впустую.
+ */
+app.get('/sitemap.xml', async (req, res) => {
+  const base = PUBLIC_URL.replace(/\/+$/, '');
+  const esc = (v) => String(v).replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/>/g, '&gt;');
+
+  const staticPages = [
+    { loc: '/', priority: '1.0', freq: 'daily' },
+    { loc: '/crate-pvp', priority: '0.8', freq: 'hourly' },
+    { loc: '/upgrader', priority: '0.8', freq: 'daily' },
+    { loc: '/giveaway', priority: '0.7', freq: 'daily' },
+    { loc: '/terms-and-conditions', priority: '0.3', freq: 'yearly' },
+    { loc: '/privacy-policy', priority: '0.3', freq: 'yearly' },
+    { loc: '/refund-policy', priority: '0.3', freq: 'yearly' }
+  ];
+
+  let cases = [];
+  try {
+    cases = await queryAdminDb(
+      // created_at, а не updated_at: такой колонки в cases нет, и запрос
+      // молча падал в catch — карта выходила без единого кейса.
+      `SELECT slug, created_at FROM cases
+        WHERE slug IS NOT NULL AND slug <> '' AND (archived IS NULL OR archived = 0)
+        ORDER BY sortOrder ASC, id ASC LIMIT 2000`);
+  } catch { cases = []; }
+
+  const today = new Date().toISOString().slice(0, 10);
+  const urls = [
+    ...staticPages.map(p => `  <url>
+    <loc>${esc(base + p.loc)}</loc>
+    <lastmod>${today}</lastmod>
+    <changefreq>${p.freq}</changefreq>
+    <priority>${p.priority}</priority>
+  </url>`),
+    ...cases.map(c => `  <url>
+    <loc>${esc(base + '/cases/' + c.slug)}</loc>
+    <lastmod>${String(c.created_at || today).slice(0, 10)}</lastmod>
+    <changefreq>weekly</changefreq>
+    <priority>0.6</priority>
+  </url>`)
+  ];
+
+  // Собираем через join, а не одним шаблоном: перевод строки внутри шаблонной
+  // строки здесь уже ломал файл при генерации.
+  const NL = String.fromCharCode(10);
+  res.type('application/xml').send([
+    '<?xml version="1.0" encoding="UTF-8"?>',
+    '<urlset xmlns="http://www.sitemaps.org/schemas/sitemap/0.9">',
+    urls.join(NL),
+    '</urlset>',
+    ''
+  ].join(NL));
+});
+
 app.get('*', (req, res) => {
   const indexPath = path.join(PUBLIC_DIR, 'index.html');
   if (fs.existsSync(indexPath)) {
