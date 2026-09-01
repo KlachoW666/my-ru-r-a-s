@@ -2339,8 +2339,10 @@ app.post(['/api/v1/wallet/deposit/card', '/api/v1/wallet/deposit'], async (req, 
   const min = Number(limits.minDeposit ?? 100);
   const max = Number(limits.maxDeposit ?? 150000);
   if (!Number.isFinite(amount) || amount < min || amount > max) {
+    // Код читается бандлом дословно: по нему показывается сообщение про
+    // предельную сумму. Любой другой уходит в общий «что-то пошло не так».
     return res.status(400).json({
-      status: 'error', code: 'BAD_AMOUNT',
+      status: 'error', code: 'DEPOSIT_AMOUNT_OUT_OF_RANGE',
       message: `Сумма пополнения — от ${min} до ${max} ₽`
     });
   }
@@ -2384,19 +2386,29 @@ app.post(['/api/v1/wallet/deposit/card', '/api/v1/wallet/deposit'], async (req, 
       status: 'success',
       data: {
         ...deposit, provider: 'rollypay', providerRef: pay.paymentId,
+        // redirectUrl — единственное поле, которое бандл действительно читает:
+        //   const o = s?.data?.redirectUrl
+        //   if (!o) return error('deposit.card.errorNoRedirect')
+        // Без него игрок видел «Не удалось получить ссылку для оплаты», хотя
+        // заявка создавалась и ссылка приходила от шлюза. Остальные имена
+        // оставлены дублями.
+        redirectUrl: pay.payUrl,
         url: pay.payUrl, paymentUrl: pay.payUrl, payUrl: pay.payUrl,
         message: 'Перейдите к оплате'
       }
     });
   }
 
-  // Шлюза нет — заявка ждёт подтверждения администратором.
+  // Шлюза нет — заявка ждёт подтверждения администратором. Ссылку всё равно
+  // отдаём: без redirectUrl фронт покажет «Не удалось получить ссылку для
+  // оплаты», хотя заявка на самом деле создана и висит в админке.
+  const back = `${PUBLIC_URL}/wallet?deposit=${deposit.uid}&pending=1`;
   res.json({
     status: 'success',
     data: {
       ...deposit,
-      url: `${PUBLIC_URL}/wallet?deposit=${deposit.uid}`,
-      paymentUrl: `${PUBLIC_URL}/wallet?deposit=${deposit.uid}`,
+      redirectUrl: back,
+      url: back, paymentUrl: back,
       message: 'Заявка создана и ждёт подтверждения оплаты'
     }
   });
