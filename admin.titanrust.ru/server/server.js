@@ -1250,6 +1250,18 @@ const passkeys = require('./passkeys').register({
 // объявления, и регистрация внутри .then() поставила бы их после catch-all,
 // то есть они бы никогда не вызвались. Создание таблиц идёт параллельно —
 // запросы всё равно выстраиваются в очередь на одном соединении SQLite.
+// Вход по ключу доступа. Нужен потому, что собранный фронт умеет только
+// WebAuthn, а он требует настроенного аутентификатора; пока его нет, войти
+// нельзя вовсе и админка остаётся открытой всем.
+//
+// Подключается ДО adminRoutes намеренно: там объявлен параметрический
+// /admins/:id, и он перехватывал бы литеральный /admins/keys, принимая
+// "keys" за идентификатор. Express берёт первый совпавший обработчик,
+// причём порядок считается между модулями, а не внутри одного.
+require('./adminKeys').register({
+  app, db, dbAll, dbGet, dbRun, generateAdminJWT, requireAdminJWT, access
+});
+
 require('./adminRoutes').makeAdminRoutes({ app, dbAll, dbGet, dbRun, requireAdminJWT });
 require('./adminSchema').ensureAdminSchema({ dbRun, dbGet })
     .catch((e) => console.error('[Admin] Схема разделов:', e.message));

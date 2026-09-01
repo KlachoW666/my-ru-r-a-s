@@ -54,55 +54,58 @@ sudo certbot --nginx -d titanrust.ru -d www.titanrust.ru -d admin.titanrust.ru &
 
 Сразу после первого запуска, **до** того как домен станет доступен снаружи: пока `ADMIN_REQUIRE_AUTH=0`, админка пускает любой запрос без токена.
 
-Экран `/register` не показывает форму без токена в адресе, а первое приглашение владельцу выдать некому — администраторов ещё нет. Поэтому первый токен создаётся из консоли:
+Вход сделан по ключу доступа. Passkey тоже работает, но требует настроенного аутентификатора — Windows Hello, Touch ID или USB-брелка; пока их нет, войти было бы нечем.
+
+Первый ключ выдать некому, поэтому он создаётся из консоли:
 
 ```bash
-cd /var/www/titanrust && node deploy/make-invite.js --role SUPER_ADMIN
+cd /var/www/titanrust && node deploy/make-key.js --role SUPER_ADMIN
 ```
 
-Скрипт напечатает ссылку вида `https://admin.titanrust.ru/register?token=…`. Откройте её **в том браузере, где будет храниться ключ**, введите название ключа («MacBook Touch ID», «Ключ Klacho») и подтвердите отпечатком, лицом или PIN.
+Скрипт напечатает ключ вида `trk_…`. **Сохраните его сразу**: в базе лежит только SHA-256, показать повторно невозможно. Потеряли — выпишите новый, старый отзовите.
 
-Токен одноразовый, живёт сутки и гаснет, как только по нему завели ключ. Прерванная регистрация его не сжигает — можно повторить.
+Вход: `https://admin.titanrust.ru/key-login.html`
 
-Проверить, что ключ записался:
-
-```bash
-curl -s https://admin.titanrust.ru/api/v1/admin/auth/passkeys
-```
-
-Должно быть `count: 1`, а рядом — `username` и `role` владельца. После этого закрываем вход:
+Страница кладёт токен туда же, откуда его читает панель, и уходит на главную — дальше всё как обычно. После этого закрываем вход всем остальным:
 
 ```bash
 cd /var/www/titanrust && sed -i "s/^ADMIN_REQUIRE_AUTH=.*/ADMIN_REQUIRE_AUTH=1/" .env && pm2 restart admin-panel --update-env
 ```
 
-Теперь `/api/v1/admin/*` без токена отвечает 401, а вход — только по ключу.
+### Ключи остальным администраторам
 
-### Остальные администраторы
-
-Владелец приглашает их из админки, ролью и сроком:
+Владелец выписывает их сам:
 
 ```bash
-curl -s -X POST https://admin.titanrust.ru/api/v1/admin/admins/invite -H "Authorization: Bearer $TOKEN" -H "Content-Type: application/json" -d '{"role":"MODERATOR","username":"Ivan","hours":24}'
+curl -s -X POST https://admin.titanrust.ru/api/v1/admin/admins/keys -H "Authorization: Bearer $TOKEN" -H "Content-Type: application/json" -d '{"username":"Ivan","role":"MODERATOR","days":90}'
 ```
 
-В ответе придёт готовая ссылка. Роли и их права описаны в [../docs/ADMIN.md](../docs/ADMIN.md#права-доступа): `SUPER_ADMIN` может всё, `ADMIN` — всё кроме управления администраторами, `FINANCE` — деньги и RTP, `MODERATOR` — игроки и контент, `VIEWER` — только чтение.
+Роли описаны в [../docs/ADMIN.md](../docs/ADMIN.md#права-доступа). Выписывать ключи может только владелец: раздел закрыт доменом `admins`.
 
-Кто ещё не завёл ключ, видно здесь:
+С сервера то же самое делается так:
 
 ```bash
-curl -s https://admin.titanrust.ru/api/v1/admin/admins/invites -H "Authorization: Bearer $TOKEN"
+cd /var/www/titanrust && node deploy/make-key.js --username Ivan --role MODERATOR --days 90
+```
+
+Посмотреть выданные и отозвать:
+
+```bash
+cd /var/www/titanrust && node deploy/make-key.js --list
+```
+
+```bash
+cd /var/www/titanrust && node deploy/make-key.js --revoke 3
 ```
 
 ### Если что-то не так
 
 | Симптом | Причина |
 |---|---|
-| `Request failed with status code 409` на кнопке входа | ни одного ключа не заведено — это ожидаемо до первой регистрации |
-| «Ссылка без токена приглашения» | открыли `/register` без `?token=…` |
-| «Приглашение недействительно или истекло» | токен уже использован, просрочен или скопирован не целиком |
-| Браузер не предлагает создать ключ | `ADMIN_RP_ID` не совпадает с доменом в адресной строке; для `admin.titanrust.ru` подходит `titanrust.ru` |
-| Ключ создан, но вход не проходит | домен открыт не по HTTPS: WebAuthn работает только в защищённом контексте |
+| «Ключ недействителен» | ключ отозван, истёк или скопирован не целиком — ответ одинаковый намеренно, чтобы по нему нельзя было узнать, существовал ли ключ |
+| «Слишком много попыток» | сработало ограничение перебора: 10 неудач с одного адреса за 15 минут |
+| Панель открывается и сразу выкидывает | токен просрочен, войдите заново на `/key-login.html` |
+| `Request failed with status code 409` на passkey | ни одного ключа WebAuthn не заведено — это ожидаемо, пользуйтесь входом по ключу |
 
 ## Если сервер уже развёрнут со старого коммита
 
