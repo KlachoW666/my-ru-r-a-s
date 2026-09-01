@@ -295,7 +295,11 @@ if [ -n "$DIRTY" ]; then
   while IFS= read -r f; do
     [ -z "$f" ] && continue
     case "$f" in
-      *node_modules/*|*.sqlite) continue ;;
+      # node_modules и база — наследие прежнего устройства репозитория.
+      # data/skins.json — кэш каталога, его перезаписывает синхронизация со
+      # Steam: на сервере он расходится после первого же круга обхода и
+      # блокировал бы каждое обновление.
+      *node_modules/*|*.sqlite|data/skins.json) continue ;;
     esac
     if git diff --quiet "$TARGET" -- "$f" 2>/dev/null; then continue; fi
     REAL_DIRTY="$REAL_DIRTY$f"$'
