@@ -615,6 +615,8 @@ module.exports = {
   normalizeLegacyRarities,
   classifyRarity,
   refreshFxRate,
+  // Нужен модулю цен из steamdataapi: там те же центы USD.
+  usdCentsToRub,
   openDb,
   COLOR_TO_RARITY,
   RARITY_HEX,

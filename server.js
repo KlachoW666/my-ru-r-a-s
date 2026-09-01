@@ -34,7 +34,10 @@ const {
   ensureCatalogSchema,
   openDb: openCatalogDb,
   PAGE_SIZE: CATALOG_PAGE_SIZE,
-  REQUEST_INTERVAL_MS: CATALOG_INTERVAL_MS
+  REQUEST_INTERVAL_MS: CATALOG_INTERVAL_MS,
+  // Нужны обновлению цен из steamdataapi: там те же центы USD и тот же курс.
+  refreshFxRate,
+  usdCentsToRub
 } = require('./services/steamCatalog');
 const {
   buildDistribution, rollOne, pickByRoll, newServerSeed, chancesForDisplay, fairFloat, DEFAULT_RTP
@@ -44,6 +47,11 @@ const { verifyMailer } = require('./services/mailer');
 const { makeBattlesService } = require('./services/battles');
 const { makeDepositsService } = require('./services/deposits');
 const { makeWalletConfig } = require('./services/walletConfig');
+const steamData = require('./services/steamDataApi');
+
+// Как часто тянуть цены. Сервис пересчитывает их каждые 5 минут, чаще смысла
+// нет. 0 — не обновлять автоматически, только вручную deploy/prices.js.
+const PRICE_REFRESH_MS = Number(process.env.STEAMDATA_REFRESH_MS || 15 * 60 * 1000);
 const rollypay = require('./services/rollypay');
 const { makeGiveawaysService } = require('./services/giveaways');
 const { makeInventoryService } = require('./services/inventory');
@@ -2566,9 +2574,43 @@ server.listen(PORT, async () => {
   console.log(` Steam return_to:           ${PUBLIC_URL}/api/v1/auth/steam/return`);
   console.log(` Admin DB Connected: ${ADMIN_DB_PATH}`);
   console.log(` WebSocket /ws Active on Port ${PORT}`);
+  // Обновление цен из steamdataapi. Весь каталог приходит одним запросом,
+  // поэтому это можно делать часто — в отличие от обхода Steam Market, где
+  // круг по 543 запроса занимает около получаса.
+  //
+  // Редкость здесь не трогается: в этом API её нет, и берётся она только из
+  // name_color при обходе Steam. Поэтому обход остаётся включённым — он ищет
+  // новые предметы и проставляет им редкость, просто теперь не спешит.
+  if (steamData.isConfigured() && PRICE_REFRESH_MS > 0) {
+    const refresh = async () => {
+      try {
+        const db = openCatalogDb();
+        if (!db) return;
+        await refreshFxRate();
+        const r = await steamData.refreshPrices({
+          db,
+          run: (d, sql, prm) => new Promise((res) => d.run(sql, prm, function (e) { res(e ? null : this); })),
+          all: (d, sql, prm) => new Promise((res) => d.all(sql, prm, (e, rows) => res(e ? [] : rows || []))),
+          usdCentsToRub
+        });
+        db.close();
+        if (r.ok) {
+          console.log(`[Цены] Обновлено ${r.updated} из ${r.fromApi}, картинок ${r.imagesFixed}, сдвиг ${r.shiftPercent}%`);
+        } else {
+          console.warn(`[Цены] Не обновились: ${r.message}`);
+        }
+      } catch (e) { console.warn(`[Цены] ${e.message}`); }
+    };
+    setTimeout(refresh, 15000).unref?.();
+    setInterval(refresh, PRICE_REFRESH_MS).unref?.();
+  }
+
   console.log(` Каталог Steam: ${catalogEnabled
     ? `обход включён (${CATALOG_PAGE_SIZE} поз./запрос, интервал ${CATALOG_INTERVAL_MS} мс)`
     : 'выключен (STEAM_CATALOG_SYNC=0)'}`);
+  console.log(` Цены steamdataapi: ${steamData.isConfigured()
+    ? `каждые ${Math.round(PRICE_REFRESH_MS / 60000)} мин, поле «${steamData.PRICE_FIELD}»`
+    : 'выключены (STEAMDATA_API_KEY не задан)'}`);
   if (ALLOW_MOCK_AUTH) {
     console.log(` [!] ALLOW_MOCK_AUTH включён — без токена отдаётся моковый профиль.`);
     console.log(`     В проде запускать с NODE_ENV=production.`);
