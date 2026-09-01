@@ -1727,46 +1727,71 @@ const UPGRADER_MAX_MULT = 100;
 app.post('/api/v1/upgrader/place', async (req, res) => {
   try {
     const body = req.body || {};
-    const itemIds = Array.isArray(body.itemIds) ? body.itemIds : [];
     const catalog = await getLiveItems();
     const byId = new Map(catalog.map(i => [String(i.id), i]));
 
-    // Ставка: сумма выбранных предметов; если предметы не переданы —
-    // betAmount как сумма в рублях.
-    const wagered = itemIds.map(id => byId.get(String(id))).filter(Boolean);
-    const itemsValue = wagered.reduce((a, i) => a + (Number(i.price) || 0), 0);
-    const rawBet = Number(body.betAmount);
+    /*
+     * Что на самом деле присылает фронт (landing-mLe--Uh6.js, store апгрейдера):
+     *
+     *   placeUpgrade({ itemIds: n.value.map(t => t.id), betAmount: l.value })
+     *
+     * itemIds — это ЦЕЛЬ, предметы, на которые игрок хочет поднять ставку.
+     * betAmount — сама ставка в монетах, и приходит она СТРОКОЙ.
+     * Множитель фронт нигде не шлёт: он показывает его как отношение
+     * стоимости цели к ставке, ровно то, что видно на экране — 110 / 25 = x4.4.
+     *
+     * Раньше сервер понимал это наоборот: считал itemIds ставкой, а betAmount
+     * множителем. При ставке 25 и цели за 110 выходило, что игрок ставит 110
+     * и метит в 2750, — и запрос отбивался как некорректный.
+     */
+    const itemIds = Array.isArray(body.itemIds) ? body.itemIds
+      : (body.itemIds != null ? [body.itemIds] : []);
 
-    // betAmount у фронта используется и как множитель (1.05..100), и как сумма.
-    // Различаем по наличию выбранных предметов: с предметами это множитель.
-    let betAmount;
-    let targetValue;
+    const targets = itemIds.map(id => byId.get(String(id))).filter(Boolean);
+    const targetFromItems = targets.reduce((a, i) => a + (Number(i.price) || 0), 0);
+
+    // Явная цель одним полем — на случай, если её пришлют так.
     const explicitTarget = body.targetItemId != null ? byId.get(String(body.targetItemId)) : null;
 
-    if (explicitTarget) {
-      betAmount = itemsValue > 0 ? itemsValue : (Number.isFinite(rawBet) ? rawBet : 0);
-      targetValue = Number(explicitTarget.price) || 0;
-    } else if (itemsValue > 0 && Number.isFinite(rawBet) && rawBet >= UPGRADER_MIN_MULT && rawBet <= UPGRADER_MAX_MULT) {
-      betAmount = itemsValue;
-      targetValue = itemsValue * rawBet;
-    } else {
-      betAmount = itemsValue > 0 ? itemsValue : (Number.isFinite(rawBet) ? rawBet : 0);
-      const mult = Number(body.multiplier) || 2;
-      targetValue = betAmount * Math.min(Math.max(mult, UPGRADER_MIN_MULT), UPGRADER_MAX_MULT);
+    const betAmount = Math.round(Number(body.betAmount) || 0);
+    let targetValue = explicitTarget ? (Number(explicitTarget.price) || 0) : targetFromItems;
+
+    // Цели нет, но есть множитель — считаем от ставки.
+    if (!(targetValue > 0) && Number.isFinite(Number(body.multiplier))) {
+      const mult = Math.min(Math.max(Number(body.multiplier), UPGRADER_MIN_MULT), UPGRADER_MAX_MULT);
+      targetValue = betAmount * mult;
     }
 
-    if (!(betAmount > 0) || !(targetValue > 0)) {
+    if (!(betAmount > 0)) {
+      return res.status(400).json({
+        status: "error", code: "INVALID_UPGRADE", message: "Не задана ставка"
+      });
+    }
+    if (!(targetValue > 0)) {
       return res.status(400).json({
         status: "error", code: "INVALID_UPGRADE",
-        message: "Не выбраны предметы или не задан множитель"
+        message: itemIds.length
+          ? "Выбранных предметов нет в каталоге"
+          : "Не выбран предмет для апгрейда"
       });
     }
-    if (targetValue < betAmount * UPGRADER_MIN_MULT) {
+
+    const mult = targetValue / betAmount;
+    if (mult < UPGRADER_MIN_MULT) {
       return res.status(400).json({
         status: "error", code: "INVALID_MULTIPLIER",
-        message: `Множитель должен быть не меньше ${UPGRADER_MIN_MULT}`
+        message: `Цель должна быть дороже ставки минимум в ${UPGRADER_MIN_MULT} раза`
       });
     }
+    if (mult > UPGRADER_MAX_MULT) {
+      return res.status(400).json({
+        status: "error", code: "INVALID_MULTIPLIER",
+        message: `Множитель больше ${UPGRADER_MAX_MULT} недоступен`
+      });
+    }
+
+    // Для ответа: суммарная стоимость выбранной цели.
+    const itemsValue = targetValue;
 
     const balanceBefore = await getBalance(req, mockUser);
     if (balanceBefore < betAmount) {
@@ -1787,7 +1812,10 @@ app.post('/api/v1/upgrader/place', async (req, res) => {
     const won = ticket < chance;
 
     // Предмет-цель: ближайший по стоимости из каталога, а не skins[0].
-    let bestItem = explicitTarget;
+    // Цель выбрана игроком — её и показываем, а не «похожую по цене».
+    let bestItem = explicitTarget
+      || targets.slice().sort((a, b) => (Number(b.price) || 0) - (Number(a.price) || 0))[0]
+      || null;
     if (!bestItem) {
       bestItem = catalog.reduce((best, i) => {
         const d = Math.abs((Number(i.price) || 0) - targetValue);
