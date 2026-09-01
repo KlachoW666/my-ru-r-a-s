@@ -48,6 +48,7 @@ const { makeBattlesService } = require('./services/battles');
 const { makeDepositsService } = require('./services/deposits');
 const { makeWalletConfig } = require('./services/walletConfig');
 const steamData = require('./services/steamDataApi');
+const { makeRatesService } = require('./services/rates');
 
 // Как часто тянуть цены. Сервис пересчитывает их каждые 5 минут, чаще смысла
 // нет. 0 — не обновлять автоматически, только вручную deploy/prices.js.
@@ -539,6 +540,8 @@ const battles = makeBattlesService({
 // не могут появиться в обход подтверждения.
 const deposits = makeDepositsService({ queryAdminDb, getAdminDb, adjustBalanceById });
 const walletConfig = makeWalletConfig({ queryAdminDb, adminSetting });
+// Курсы валют кошелька. Обновляются сами: строки source='manual' не трогаются.
+const rates = makeRatesService({ queryAdminDb, getAdminDb, rollypay });
 const giveaways = makeGiveawaysService({
   queryAdminDb, getAdminDb, queryItems, adjustBalanceById, fixImageUrl
 });
@@ -2604,6 +2607,20 @@ server.listen(PORT, async () => {
     setTimeout(refresh, 15000).unref?.();
     setInterval(refresh, PRICE_REFRESH_MS).unref?.();
   }
+
+  // Курсы кошелька. Без этого USDT стоял бы тем значением, что записали при
+  // создании таблицы: на боевом сервере оно не менялось с 23 августа.
+  const refreshRates = async () => {
+    try {
+      const r = await rates.refresh({ force: true });
+      if (r?.written?.length) {
+        console.log(`[Курсы] Обновлено: ${r.written.join(', ')}${r.skippedManual.length ? ` (вручную: ${r.skippedManual.join(', ')})` : ''}`);
+      }
+      if (r?.failed?.length) console.warn(`[Курсы] Не записались: ${r.failed.join('; ')}`);
+    } catch (e) { console.warn(`[Курсы] ${e.message}`); }
+  };
+  setTimeout(refreshRates, 5000).unref?.();
+  setInterval(refreshRates, rates.RATES_TTL_MS).unref?.();
 
   console.log(` Каталог Steam: ${catalogEnabled
     ? `обход включён (${CATALOG_PAGE_SIZE} поз./запрос, интервал ${CATALOG_INTERVAL_MS} мс)`
