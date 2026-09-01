@@ -559,7 +559,23 @@ const FEED_NAMES = [
   'Сталкер', 'Мясник', 'Хантер', 'Гоша', 'Рейдер', 'Пепел', 'Тайга'
 ];
 
-function makeWin({ item, user, eventType = 'CASE', caseSlug = '', caseImage = null, betAmount = 0, multiplier = 1, wonAt }) {
+/**
+ * eventType у нас в верхнем регистре, а карточка ленты читает `gameType`
+ * строчными — и по нему решает, куда вести по клику:
+ *
+ *   switch (drop.gameType) {
+ *     case 'case':        push({name:'case', params:{slug: drop.caseSlug}})
+ *     case 'cratebattle': push({name:'crate-pvp-battle', params:{uid: drop.battleId}})
+ *     case 'upgrader':    push({name:'upgrader'})
+ *   }
+ *
+ * Поля `gameType` сервер не отдавал вовсе, поэтому switch не совпадал ни с
+ * чем и клик по карточке молчал.
+ */
+const GAME_TYPE = { CASE: 'case', BATTLE: 'cratebattle', CRATEBATTLE: 'cratebattle', UPGRADER: 'upgrader' };
+
+function makeWin({ item, user, eventType = 'CASE', caseSlug = '', caseName = '', caseImage = null,
+                   battleId = null, betAmount = 0, multiplier = 1, wonAt }) {
   const value = Number(item.price) || 0;
   return {
     sourceEventId: `${eventType}-${wonAt}-${Math.random().toString(36).slice(2, 8)}`,
@@ -569,6 +585,8 @@ function makeWin({ item, user, eventType = 'CASE', caseSlug = '', caseImage = nu
     steamLevel: user.steamLevel ?? 0,
     wonAt,
     eventType,
+    // Строчный вариант для карточки. Без него не работают ни клик, ни переход.
+    gameType: GAME_TYPE[String(eventType).toUpperCase()] || 'case',
     itemName: item.name,
     itemImage: fixImageUrl(item.image),
     itemValue: value,
@@ -578,6 +596,9 @@ function makeWin({ item, user, eventType = 'CASE', caseSlug = '', caseImage = nu
     isBigWin: value >= 5000,
     caseImage,
     caseSlug,
+    // Название кейса показывается при наведении. Его сервер тоже не отдавал.
+    caseName,
+    battleId,
     itemColor: item.colorHex || item.color || null,
     itemRarity: mapRarity(item.rarity)
   };
@@ -607,14 +628,29 @@ async function buildSyntheticFeed() {
     return src[Math.floor(Math.random() * src.length)];
   };
 
+  // Синтетику привязываем к НАСТОЯЩИМ кейсам. Без этого у карточки нет ни
+  // картинки кейса, ни названия для подсказки, а клик ведёт в никуда —
+  // а синтетика заполняет почти всю ленту, пока игроков мало.
+  const cases = (await getLiveCases()).filter(c => c.slug);
+
   const now = Math.floor(Date.now() / 1000);
   const out = [];
   for (let i = 0; i < LIVE_FEED_MAX; i++) {
     const item = pick();
+    const eventType = i % 9 === 0 ? 'UPGRADER' : i % 5 === 0 ? 'BATTLE' : 'CASE';
+    // Кейс нужен только выпадению из кейса: у апгрейдера и баттла свои
+    // страницы, и подсовывать им кейс было бы враньём.
+    const c = eventType === 'CASE' && cases.length
+      ? cases[Math.floor(Math.random() * cases.length)]
+      : null;
+
     out.push(makeWin({
       item,
       user: { id: 1000 + i, name: FEED_NAMES[i % FEED_NAMES.length] + (i % 7 ? '' : '_' + (10 + i)), avatar: mockAvatar, steamLevel: (i * 7) % 60 },
-      eventType: i % 9 === 0 ? 'UPGRADER' : i % 5 === 0 ? 'BATTLE' : 'CASE',
+      eventType,
+      caseSlug: c ? c.slug : '',
+      caseName: c ? c.name : '',
+      caseImage: c ? c.image : null,
       betAmount: Math.round(item.price * (0.4 + Math.random() * 0.5)),
       multiplier: 1,
       wonAt: now - i * 11
@@ -1037,6 +1073,7 @@ app.post(['/api/v1/cases/open', '/api/v1/cases/:slug/open'], async (req, res) =>
         user: { id: user.id, name: user.username, avatar: user.avatar },
         eventType: 'CASE',
         caseSlug: slug,
+        caseName: c ? c.name : '',
         caseImage: c ? c.image : null,
         betAmount: casePrice,
         wonAt: nowSec
@@ -1587,7 +1624,8 @@ app.post('/api/v1/deposit-chain/open', async (req, res) => {
     pushLiveDrop(makeWin({
       item: { name: item.name, price: value, image: item.image, rarity: item.rarity, colorHex: item.color },
       user: { id: user.id, name: user.username, avatar: user.avatar },
-      eventType: 'CASE', caseSlug: src ? src.slug : '', caseImage: tier.caseImage,
+      eventType: 'CASE', caseSlug: src ? src.slug : '',
+      caseName: tier.caseName || (src ? src.name : ''), caseImage: tier.caseImage,
       betAmount: 0, wonAt: Math.floor(Date.now() / 1000)
     }));
   }
