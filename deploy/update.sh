@@ -62,6 +62,18 @@ fi
 # окружения: BRANCH=dev ./deploy/update.sh
 BRANCH="${BRANCH:-main}"
 REMOTE="${REMOTE:-origin}"
+
+# Git не должен спрашивать логин. Без этого скрипт, запущенный по ssh или из
+# cron, зависает на приглашении ввода и висит до таймаута, а в терминале —
+# требует пароль, которого у обновления быть не должно.
+#
+# GIT_TERMINAL_PROMPT=0 запрещает приглашение в самом git,
+# GIT_ASKPASS=/bin/echo затыкает внешние помощники ввода (в том числе
+# графические), SSH_ASKPASS — то же самое для ssh-ключей.
+export GIT_TERMINAL_PROMPT=0
+export GIT_ASKPASS=/bin/echo
+export SSH_ASKPASS=/bin/echo
+export GIT_LFS_SKIP_SMUDGE=1
 SITE_SERVICE="${SITE_SERVICE:-titanrust}"
 ADMIN_SERVICE="${ADMIN_SERVICE:-titanrust-admin}"
 BACKUP_DIR="${BACKUP_DIR:-$APP_DIR/backups}"
@@ -260,7 +272,51 @@ step "Обновление кода"
 PREV_COMMIT="$(git rev-parse HEAD)"
 info "было: $PREV_COMMIT $(git log -1 --format=%s)"
 
-run git fetch "$REMOTE" "$BRANCH" --tags
+# Логин, вшитый в адрес репозитория, заставляет git идти по авторизованному
+# пути даже к публичному репозиторию: он спрашивает пароль, получает пустой и
+# падает с 401. Убираем логин — но только убедившись, что анонимный доступ
+# действительно работает. У приватного репозитория такая «починка» сломала бы
+# обновление насовсем.
+REMOTE_URL="$(git remote get-url "$REMOTE" 2>/dev/null || echo "")"
+case "$REMOTE_URL" in
+  https://*@github.com/*)
+    CLEAN_URL="https://github.com/${REMOTE_URL#*@github.com/}"
+    info "в адресе репозитория вшит логин, из-за него git и спрашивал пароль"
+    if git ls-remote --exit-code "$CLEAN_URL" "$BRANCH" >/dev/null 2>&1; then
+      run git remote set-url "$REMOTE" "$CLEAN_URL"
+      REMOTE_URL="$CLEAN_URL"
+      info "репозиторий публичный, логин убран: $CLEAN_URL"
+    else
+      warn "без логина репозиторий недоступен — видимо, он приватный"
+      warn "адрес оставлен как есть, понадобится ключ доступа (см. ниже)"
+    fi
+    ;;
+esac
+
+if ! run git fetch "$REMOTE" "$BRANCH" --tags; then
+  echo ""
+  warn "не удалось забрать код из $REMOTE"
+  warn "адрес: ${REMOTE_URL:-неизвестен}"
+  echo ""
+  echo "    Если репозиторий публичный, обновление должно работать без пароля."
+  echo "    Проверить это можно так:"
+  echo ""
+  echo "      git ls-remote https://github.com/KlachoW666/my-ru-r-a-s.git main"
+  echo ""
+  echo "    Команда отвечает — значит дело в адресе или в сохранённых учётных"
+  echo "    данных. Убрать и то и другое:"
+  echo ""
+  echo "      git remote set-url $REMOTE https://github.com/KlachoW666/my-ru-r-a-s.git"
+  echo "      git config --global --unset credential.helper"
+  echo ""
+  echo "    Команда не отвечает — репозиторий приватный, и нужен ключ доступа."
+  echo "    Заводится он на GitHub (Settings -> Deploy keys), после чего:"
+  echo ""
+  echo "      git remote set-url $REMOTE git@github.com:KlachoW666/my-ru-r-a-s.git"
+  echo ""
+  die "обновление кода прервано"
+fi
+
 TARGET="$(git rev-parse "$REMOTE/$BRANCH" 2>/dev/null || echo "")"
 [ -n "$TARGET" ] || die "не нашёл $REMOTE/$BRANCH"
 
