@@ -1,0 +1,172 @@
+{
+  "note": "Пути к артам кейсов SATCHEL. Правится вместе с файлами в этой папке.",
+  "size": 240,
+  "categories": [
+    "SURVIVAL",
+    "ARSENAL",
+    "RAID",
+    "ELITE"
+  ],
+  "cases": [
+    {
+      "id": "01",
+      "slug": "barely-alive",
+      "name": "Barely Alive",
+      "category": "SURVIVAL",
+      "image": "/assets/cases/satchel/barely-alive.webp",
+      "imagePng": "/assets/cases/satchel/barely-alive.png"
+    },
+    {
+      "id": "02",
+      "slug": "campfire",
+      "name": "Campfire",
+      "category": "SURVIVAL",
+      "image": "/assets/cases/satchel/campfire.webp",
+      "imagePng": "/assets/cases/satchel/campfire.png"
+    },
+    {
+      "id": "03",
+      "slug": "hazmat-run",
+      "name": "Hazmat Run",
+      "category": "SURVIVAL",
+      "image": "/assets/cases/satchel/hazmat-run.webp",
+      "imagePng": "/assets/cases/satchel/hazmat-run.png"
+    },
+    {
+      "id": "04",
+      "slug": "airdrop",
+      "name": "Airdrop",
+      "category": "SURVIVAL",
+      "image": "/assets/cases/satchel/airdrop.webp",
+      "imagePng": "/assets/cases/satchel/airdrop.png"
+    },
+    {
+      "id": "05",
+      "slug": "monument",
+      "name": "Monument",
+      "category": "SURVIVAL",
+      "image": "/assets/cases/satchel/monument.webp",
+      "imagePng": "/assets/cases/satchel/monument.png"
+    },
+    {
+      "id": "06",
+      "slug": "pipe-dream",
+      "name": "Pipe Dream",
+      "category": "ARSENAL",
+      "image": "/assets/cases/satchel/pipe-dream.webp",
+      "imagePng": "/assets/cases/satchel/pipe-dream.png"
+    },
+    {
+      "id": "07",
+      "slug": "roadsign",
+      "name": "Roadsign",
+      "category": "ARSENAL",
+      "image": "/assets/cases/satchel/roadsign.webp",
+      "imagePng": "/assets/cases/satchel/roadsign.png"
+    },
+    {
+      "id": "08",
+      "slug": "redline",
+      "name": "Redline",
+      "category": "ARSENAL",
+      "image": "/assets/cases/satchel/redline.webp",
+      "imagePng": "/assets/cases/satchel/redline.png"
+    },
+    {
+      "id": "09",
+      "slug": "blackout",
+      "name": "Blackout",
+      "category": "ARSENAL",
+      "image": "/assets/cases/satchel/blackout.webp",
+      "imagePng": "/assets/cases/satchel/blackout.png"
+    },
+    {
+      "id": "10",
+      "slug": "blue-arsenal",
+      "name": "Blue Arsenal",
+      "category": "ARSENAL",
+      "image": "/assets/cases/satchel/blue-arsenal.webp",
+      "imagePng": "/assets/cases/satchel/blue-arsenal.png"
+    },
+    {
+      "id": "11",
+      "slug": "soft-side",
+      "name": "Soft Side",
+      "category": "RAID",
+      "image": "/assets/cases/satchel/soft-side.webp",
+      "imagePng": "/assets/cases/satchel/soft-side.png"
+    },
+    {
+      "id": "12",
+      "slug": "doorcamp",
+      "name": "Doorcamp",
+      "category": "RAID",
+      "image": "/assets/cases/satchel/doorcamp.webp",
+      "imagePng": "/assets/cases/satchel/doorcamp.png"
+    },
+    {
+      "id": "13",
+      "slug": "breach",
+      "name": "Breach",
+      "category": "RAID",
+      "image": "/assets/cases/satchel/breach.webp",
+      "imagePng": "/assets/cases/satchel/breach.png"
+    },
+    {
+      "id": "14",
+      "slug": "rocket-run",
+      "name": "Rocket Run",
+      "category": "RAID",
+      "image": "/assets/cases/satchel/rocket-run.webp",
+      "imagePng": "/assets/cases/satchel/rocket-run.png"
+    },
+    {
+      "id": "15",
+      "slug": "offline",
+      "name": "Offline",
+      "category": "RAID",
+      "image": "/assets/cases/satchel/offline.webp",
+      "imagePng": "/assets/cases/satchel/offline.png"
+    },
+    {
+      "id": "16",
+      "slug": "frostbite",
+      "name": "Frostbite",
+      "category": "ELITE",
+      "image": "/assets/cases/satchel/frostbite.webp",
+      "imagePng": "/assets/cases/satchel/frostbite.png"
+    },
+    {
+      "id": "17",
+      "slug": "neon-core",
+      "name": "Neon Core",
+      "category": "ELITE",
+      "image": "/assets/cases/satchel/neon-core.webp",
+      "imagePng": "/assets/cases/satchel/neon-core.png"
+    },
+    {
+      "id": "18",
+      "slug": "toxic-bloom",
+      "name": "Toxic Bloom",
+      "category": "ELITE",
+      "image": "/assets/cases/satchel/toxic-bloom.webp",
+      "imagePng": "/assets/cases/satchel/toxic-bloom.png"
+    },
+    {
+      "id": "19",
+      "slug": "gold-rush",
+      "name": "Gold Rush",
+      "category": "ELITE",
+      "image": "/assets/cases/satchel/gold-rush.webp",
+      "imagePng": "/assets/cases/satchel/gold-rush.png"
+    },
+    {
+      "id": "20",
+      "slug": "last-wipe",
+      "name": "Last Wipe",
+      "category": "ELITE",
+      "image": "/assets/cases/satchel/last-wipe.webp",
+      "imagePng": "/assets/cases/satchel/last-wipe.png"
+    }
+  ]
+}

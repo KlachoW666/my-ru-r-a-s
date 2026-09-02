@@ -1,0 +1,14 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="4 6 58 54" role="img" aria-label="SATCHEL">
+  <title>SATCHEL</title>
+  <!-- Одноцветный вариант: печать, тиснение, плашка. -->
+  <g>
+    <rect x="11" y="26" width="42" height="29" rx="5" fill="none" stroke="#0d0f0e" stroke-width="4"/>
+    <path d="M13 36H51" stroke="#0d0f0e" stroke-width="2.6" stroke-linecap="round"/>
+    <path d="M32 26V36" stroke="#0d0f0e" stroke-width="2.6" stroke-linecap="round"/>
+    <circle cx="21" cy="46" r="4.0" fill="#0d0f0e"/>
+    <circle cx="32" cy="46" r="4.0" fill="#0d0f0e"/>
+    <circle cx="43" cy="46" r="4.0" fill="#0d0f0e"/>
+    <polyline points="43 26 47 20 52 17" fill="none" stroke="#0d0f0e" stroke-width="3.2" stroke-linecap="round" stroke-linejoin="round"/>
+    <circle cx="55" cy="14" r="4.2" fill="#0d0f0e"/>
+  </g>
+</svg>

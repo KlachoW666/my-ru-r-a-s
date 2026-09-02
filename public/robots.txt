@@ -1,4 +1,4 @@
-# TITAN RUST — titanrust.ru
+# SATCHEL — satchel.top
 
 User-agent: *
 Allow: /
@@ -41,4 +41,4 @@ Disallow: /
 User-agent: DotBot
 Disallow: /
 
-Sitemap: https://titanrust.ru/sitemap.xml
+Sitemap: https://satchel.top/sitemap.xml

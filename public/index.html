@@ -2,25 +2,29 @@
 <html lang="ru">
   <head>
     <meta charset="UTF-8" />
-    <!-- SVG-варианта эмблемы нет, а браузер предпочёл бы его PNG-версии,
-         поэтому объявлены только растровые. -->
+    <!-- SVG объявлен первым: он резкий в любом размере, а браузеры, которые
+         его не берут, спокойно падают на .ico ниже. -->
+    <link rel="icon" type="image/svg+xml" href="/favicon.svg" />
     <link rel="icon" type="image/png" sizes="256x256" href="/logo-symbol.png" />
     <link rel="icon" href="/favicon.ico" sizes="any" />
     <link rel="apple-touch-icon" href="/apple-touch-icon.png" />
     <meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover" />
-    <meta name="theme-color" content="#0e0e10" />
+    <meta name="theme-color" content="#080909" />
 
     <!-- Primary meta -->
     <meta
       name="description"
-      content="Открывай кейсы Rust, крути апгрейдер, собирай скины. Кейс-баттлы, дропы и розыгрыши. Титан держит удар. Шансы честные, без бонусной мишуры."
+      content="Открывай кейсы Rust, поднимай скины в апгрейдере, сражайся в кейс-баттлах. Подожги фитиль. Шансы честные, без бонусной мишуры."
     />
     <meta name="robots" content="index, follow, max-image-preview:large" />
     <!-- Legacy content-rating signal (age-gate exists at Steam login); Google
          ignores this, some parental-control filters still read it. -->
     <meta name="rating" content="adult" />
-    <meta name="author" content="TITAN RUST" />
-    <link rel="canonical" href="https://titanrust.ru/" />
+    <meta name="author" content="SATCHEL" />
+    <link rel="canonical" href="https://satchel.top/" />
+    <!-- TODO_CONFIRM_DOMAIN: код выдан для titanrust.ru. На satchel.top он
+         бесполезен, но удалять рано — пока старый домен обслуживается, его
+         снятие сломает уже пройденное подтверждение. -->
     <meta name="yandex-verification" content="5e390e3b8ce1b223" />
     <!-- NOTE(seo): no hreflang alternates — ru/en/tr are client-side i18n only
          (locale picked from localStorage, see src/core/plugins/i18n), every language
@@ -30,23 +34,23 @@
 
     <!-- Open Graph -->
     <meta property="og:type" content="website" />
-    <meta property="og:site_name" content="TITAN RUST" />
-    <meta property="og:url" content="https://titanrust.ru/" />
+    <meta property="og:site_name" content="SATCHEL" />
+    <meta property="og:url" content="https://satchel.top/" />
     <meta property="og:locale" content="ru_RU" />
     <meta property="og:locale:alternate" content="en_US" />
     <meta property="og:locale:alternate" content="tr_TR" />
-    <meta property="og:title" content="Открытие кейсов Rust и апгрейд скинов | titanrust.ru" />
+    <meta property="og:title" content="Открытие кейсов Rust и апгрейд скинов | satchel.top" />
     <meta
       property="og:description"
-      content="Открывай кейсы Rust, крути апгрейдер, собирай скины. Кейс-баттлы, дропы и розыгрыши. Титан держит удар. Шансы честные, без бонусной мишуры."
+      content="Открывай кейсы Rust, поднимай скины в апгрейдере, сражайся в кейс-баттлах. Подожги фитиль. Шансы честные, без бонусной мишуры."
     />
-    <meta property="og:image" content="https://titanrust.ru/og-banner.jpg" />
+    <meta property="og:image" content="https://satchel.top/og-banner.jpg" />
     <meta property="og:image:width" content="1200" />
     <meta property="og:image:height" content="630" />
     <meta property="og:image:type" content="image/jpeg" />
     <meta
       property="og:image:alt"
-      content="TITAN RUST — платформа открытия кейсов Rust"
+      content="SATCHEL — открытие кейсов Rust, апгрейдер и кейс-баттлы"
     />
 
     <!-- Twitter / X -->
@@ -54,48 +58,47 @@
     <!-- NOTE(seo): "twitter:site" omitted — no confirmed live X/Twitter handle yet
          (brand brief: only Telegram and VK are shown at launch). Add once a real,
          verified handle exists; a wrong @handle mis-attributes the card. -->
-    <meta name="twitter:title" content="Открытие кейсов Rust и апгрейд скинов | titanrust.ru" />
+    <meta name="twitter:title" content="Открытие кейсов Rust и апгрейд скинов | satchel.top" />
     <meta
       name="twitter:description"
-      content="Открывай кейсы Rust, крути апгрейдер, собирай скины. Кейс-баттлы, дропы и розыгрыши."
+      content="Открывай кейсы Rust, поднимай скины в апгрейдере, сражайся в кейс-баттлах."
     />
-    <meta name="twitter:image" content="https://titanrust.ru/og-banner.jpg" />
+    <meta name="twitter:image" content="https://satchel.top/og-banner.jpg" />
 
     <!-- oEmbed -->
     <link
       rel="alternate"
       type="application/json+oembed"
-      href="https://titanrust.ru/oembed.json"
-      title="TITAN RUST"
+      href="https://satchel.top/oembed.json"
+      title="SATCHEL"
     />
 
     <!-- Mobile -->
     <meta name="mobile-web-app-capable" content="yes" />
     <meta name="apple-mobile-web-app-capable" content="yes" />
     <meta name="apple-mobile-web-app-status-bar-style" content="black-translucent" />
-    <meta name="apple-mobile-web-app-title" content="TITAN RUST" />
+    <meta name="apple-mobile-web-app-title" content="SATCHEL" />
 
-    <title>Открытие кейсов Rust и апгрейд скинов | titanrust.ru</title>
+    <title>Открытие кейсов Rust и апгрейд скинов | satchel.top</title>
 
     <!-- Structured data: Organization -->
     <script type="application/ld+json">
       {
         "@context": "https://schema.org",
         "@type": "Organization",
-        "name": "TITAN RUST",
-        "alternateName": ["Титан Раст", "TitanRust"],
+        "name": "SATCHEL",
+        "alternateName": ["SATCHEL.TOP", "Сатчел"],
         "legalName": "I.E. Artem Shits",
         "taxID": "286.1573426",
-        "url": "https://titanrust.ru",
+        "url": "https://satchel.top",
         "logo": {
           "@type": "ImageObject",
-          "url": "https://titanrust.ru/logo-symbol.png",
+          "url": "https://satchel.top/logo-symbol.png",
           "width": 256,
           "height": 256
         },
         "description": "Платформа открытия кейсов в стиле Rust: кейсы, кейс-баттлы (замесы), апгрейдер скинов",
         "areaServed": ["RU", "UA", "KZ", "BY"],
-        "sameAs": ["https://t.me/titanrust", "https://vk.com/titanrust"],
         "address": {
           "@type": "PostalAddress",
           "streetAddress": "N. Zaryan Street, Building 22A",
@@ -105,6 +108,7 @@
         },
         "contactPoint": {
           "@type": "ContactPoint",
+          "_comment": "TODO_CONFIRM_CONTACT: ящик на satchel.top не заведён. Подставлять несуществующий адрес нельзя — письма игроков пропадут, поэтому здесь рабочий адрес прежнего домена.",
           "email": "support@titanrust.ru",
           "contactType": "customer support",
           "availableLanguage": ["Russian", "English"]
@@ -117,8 +121,8 @@
       {
         "@context": "https://schema.org",
         "@type": "WebApplication",
-        "name": "TITAN RUST",
-        "url": "https://titanrust.ru",
+        "name": "SATCHEL",
+        "url": "https://satchel.top",
         "applicationCategory": "GameApplication",
         "operatingSystem": "Web",
         "browserRequirements": "Requires JavaScript. Modern browser.",
@@ -135,8 +139,8 @@
       {
         "@context": "https://schema.org",
         "@type": "WebSite",
-        "name": "TITAN RUST",
-        "url": "https://titanrust.ru",
+        "name": "SATCHEL",
+        "url": "https://satchel.top",
         "description": "Открытие кейсов Rust, кейс-баттлы и апгрейдер скинов",
         "inLanguage": "ru"
       }
@@ -154,15 +158,15 @@
         "mainEntity": [
           {
             "@type": "Question",
-            "name": "Что такое TITAN RUST?",
+            "name": "Что такое SATCHEL?",
             "acceptedAnswer": {
               "@type": "Answer",
-              "text": "TITAN RUST: платформа открытия кейсов в стиле Rust. Открывай кейсы, играй в кейс-баттлы (замесы) и апгрейдер, забирай скины. Титан держит удар. Шансы честные, без бонусной мишуры."
+              "text": "SATCHEL: платформа открытия кейсов в стиле Rust. Открывай кейсы, играй в кейс-баттлы (замесы) и апгрейдер, забирай скины. Подожги фитиль. Шансы честные, без бонусной мишуры."
             }
           },
           {
             "@type": "Question",
-            "name": "Как пополнить баланс и забрать выигрыш на TITAN RUST?",
+            "name": "Как пополнить баланс и забрать выигрыш на SATCHEL?",
             "acceptedAnswer": {
               "@type": "Answer",
               "text": "Баланс пополняется картой, криптовалютой или скинами. Выигранные предметы выводятся через Steam trade-link, который указывается в профиле."
@@ -170,7 +174,7 @@
           },
           {
             "@type": "Question",
-            "name": "Что такое кейс-баттлы (замесы) на TITAN RUST?",
+            "name": "Что такое кейс-баттлы (замесы) на SATCHEL?",
             "acceptedAnswer": {
               "@type": "Answer",
               "text": "Кейс-баттл, он же замес: несколько игроков открывают кейсы одновременно, можно создать приватное лобби. Забирает тот, кто открыл дороже."
@@ -243,7 +247,7 @@
         height: 44px;
         border-radius: 50%;
         border: 3px solid rgba(255, 255, 255, 0.1);
-        border-top-color: #2563eb;
+        border-top-color: #f36a21;
         animation: app-boot-spin 0.8s linear infinite;
       }
       @keyframes app-boot-fade-in {
@@ -380,8 +384,10 @@
     <link rel="modulepreload" crossorigin href="/assets/js/vendor-vNcy1sFx.js">
     <link rel="stylesheet" crossorigin href="/assets/css/vendor-C7FFelxn.css">
     <link rel="stylesheet" crossorigin href="/assets/css/index-BSsnhUcQ.css">
-    <!-- Синяя палитра TITAN RUST. Идёт последней: переопределяет токены акцента. -->
-    <link rel="stylesheet" href="/assets/css/titan-blue.css">
+    <!-- Тема SATCHEL. Идёт последней: переопределяет токены бандла.
+         Единственная точка перекраски — при пересборке фронта переносится
+         этот файл и эта строка. -->
+    <link rel="stylesheet" href="/assets/css/satchel-theme.css">
     <link rel="modulepreload" href="/assets/js/main-layout-C2wmUZsK.js">
     <link rel="modulepreload" href="/assets/js/index-DoTdMb5b.js">
   <link rel="manifest" href="/manifest.webmanifest"></head>
@@ -405,14 +411,14 @@
          lands. Keep in sync with on-page copy. -->
     <noscript>
       <main>
-        <h1>TITAN RUST: открытие кейсов Rust и апгрейд скинов</h1>
+        <h1>SATCHEL: открытие кейсов Rust и апгрейд скинов</h1>
         <p>
-          TITAN RUST: платформа открытия кейсов в стиле Rust. Открывай кейсы, собирай скины, играй в
+          SATCHEL: платформа открытия кейсов в стиле Rust. Открывай кейсы, собирай скины, играй в
           кейс-баттлы (замесы) и апгрейдер, участвуй в розыгрышах. Пополнение картой, криптовалютой
-          или скинами, вывод выигранных предметов через Steam trade-link. Кабан раздаёт шансы, а не
-          бонусы.
+          или скинами, вывод выигранных предметов через Steam trade-link. Подожги фитиль — шансы
+          честные, без бонусной мишуры.
         </p>
-        <nav aria-label="Разделы TITAN RUST">
+        <nav aria-label="Разделы SATCHEL">
           <ul>
             <li>
               <a href="/crate-pvp">Кейс-баттлы Rust (замесы) — играй против других игроков</a>
@@ -421,12 +427,12 @@
             <li><a href="/giveaway">Розыгрыши скинов Rust для зарегистрированных игроков</a></li>
           </ul>
         </nav>
-        <section aria-label="Частые вопросы о TITAN RUST">
-          <h2>Что такое TITAN RUST?</h2>
+        <section aria-label="Частые вопросы о SATCHEL">
+          <h2>Что такое SATCHEL?</h2>
           <p>
-            TITAN RUST: платформа открытия кейсов в стиле Rust с кейс-баттлами и апгрейдером. Титан держит удар.
+            SATCHEL: платформа открытия кейсов в стиле Rust с кейс-баттлами и апгрейдером. Подожги фитиль.
           </p>
-          <h2>Как забрать выигрыш с TITAN RUST?</h2>
+          <h2>Как забрать выигрыш с SATCHEL?</h2>
           <p>Привяжи Steam trade-link в профиле — выигранные предметы выводятся через него.</p>
         </section>
         <nav aria-label="Правовая информация">

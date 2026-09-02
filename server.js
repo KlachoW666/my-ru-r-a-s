@@ -504,14 +504,18 @@ async function getLiveBanners() {
       title: b.title || "Делай нарезки\nлутай ещё больше",
       description: "Конкурс моментов в тиктоке",
       buttonText: "Участвовать",
-      buttonColor: "#e54b38",
+      buttonColor: "#f36a21",
       buttonAction: "url",
       buttonValue: b.url || "/giveaway",
-      glowColor: "#84c424",
-      borderColor: "#4d7318",
-      background: "radial-gradient(ellipse at 80% 50%, #2e4a0d 0%, #0d1405 100%)",
+      glowColor: "#f36a21",
+      borderColor: "#754325",
+      background: "radial-gradient(ellipse at 80% 50%, #2a1409 0%, #0b0a08 100%)",
       image: b.image || "/assets/battles/winner-boar.png",
-      video: "/assets/raffle/mega-loop.mp4"
+      // Видео убрано намеренно: mega-loop.mp4 — ролик с кабаном прежнего
+      // бренда, перерисовать его нечем. Без него баннер показывает картинку,
+      // которая уже заменена на устройство SATCHEL. Вернуть, когда появится
+      // свой ролик (см. docs/SATCHEL-REBRAND.md).
+      video: null
     }));
   }
 
@@ -521,14 +525,14 @@ async function getLiveBanners() {
       title: "Делай нарезки\nлутай ещё больше",
       description: "Конкурс моментов в тиктоке",
       buttonText: "Участвовать",
-      buttonColor: "#e54b38",
+      buttonColor: "#f36a21",
       buttonAction: "url",
       buttonValue: "/giveaway",
-      glowColor: "#84c424",
-      borderColor: "#4d7318",
-      background: "radial-gradient(ellipse at 80% 50%, #2e4a0d 0%, #0d1405 100%)",
+      glowColor: "#f36a21",
+      borderColor: "#754325",
+      background: "radial-gradient(ellipse at 80% 50%, #2a1409 0%, #0b0a08 100%)",
       image: "/assets/battles/winner-boar.png",
-      video: "/assets/raffle/mega-loop.mp4"
+      video: null
     },
     {
       id: "banner-battles",
