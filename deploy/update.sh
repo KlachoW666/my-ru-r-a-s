@@ -74,6 +74,23 @@ export GIT_TERMINAL_PROMPT=0
 export GIT_ASKPASS=/bin/echo
 export SSH_ASKPASS=/bin/echo
 export GIT_LFS_SKIP_SMUDGE=1
+
+# Публичный репозиторий не требует авторизации, но git всё равно может
+# подставить в запрос учётные данные — и получить 401, если они протухли.
+# Источников четыре, и глобальный `--unset credential.helper` убирает только
+# один из них:
+#
+#   /etc/gitconfig                        системный конфиг
+#   .git/config                           локальный конфиг репозитория
+#   http.<url>.extraheader                сохранённый заголовок Authorization
+#   url.<...>.insteadOf                   подмена адреса на авторизованный
+#
+# Поэтому не угадываем, какой сработал, и не правим чужой конфиг, а глушим
+# подстановку в самой команде. Пустое значение очищает список помощников и
+# снимает заголовок; действует только на этот вызов.
+GIT_NOAUTH=(-c credential.helper=
+            -c "http.https://github.com/.extraheader="
+            -c "http.extraheader=")
 SITE_SERVICE="${SITE_SERVICE:-titanrust}"
 ADMIN_SERVICE="${ADMIN_SERVICE:-titanrust-admin}"
 BACKUP_DIR="${BACKUP_DIR:-$APP_DIR/backups}"
@@ -282,7 +299,7 @@ case "$REMOTE_URL" in
   https://*@github.com/*)
     CLEAN_URL="https://github.com/${REMOTE_URL#*@github.com/}"
     info "в адресе репозитория вшит логин, из-за него git и спрашивал пароль"
-    if git ls-remote --exit-code "$CLEAN_URL" "$BRANCH" >/dev/null 2>&1; then
+    if git "${GIT_NOAUTH[@]}" ls-remote --exit-code "$CLEAN_URL" "$BRANCH" >/dev/null 2>&1; then
       run git remote set-url "$REMOTE" "$CLEAN_URL"
       REMOTE_URL="$CLEAN_URL"
       info "репозиторий публичный, логин убран: $CLEAN_URL"
@@ -293,26 +310,32 @@ case "$REMOTE_URL" in
     ;;
 esac
 
-if ! run git fetch "$REMOTE" "$BRANCH" --tags; then
+if ! run git "${GIT_NOAUTH[@]}" fetch "$REMOTE" "$BRANCH" --tags; then
   echo ""
   warn "не удалось забрать код из $REMOTE"
   warn "адрес: ${REMOTE_URL:-неизвестен}"
   echo ""
-  echo "    Если репозиторий публичный, обновление должно работать без пароля."
-  echo "    Проверить это можно так:"
+  echo "    Обновление уже пробовало забрать код без авторизации — не помогло."
+  echo "    Значит учётные данные подставляются откуда-то ещё. Показать откуда:"
   echo ""
-  echo "      git ls-remote https://github.com/KlachoW666/my-ru-r-a-s.git main"
+  echo "      git config --show-origin --get-regexp 'credential|extraheader|insteadOf'"
   echo ""
-  echo "    Команда отвечает — значит дело в адресе или в сохранённых учётных"
-  echo "    данных. Убрать и то и другое:"
+  echo "    В выводе слева будет файл, где лежит настройка. Убрать её оттуда:"
   echo ""
-  echo "      git remote set-url $REMOTE https://github.com/KlachoW666/my-ru-r-a-s.git"
-  echo "      git config --global --unset credential.helper"
+  echo "      git config --file <ФАЙЛ> --unset-all <ИМЯ_НАСТРОЙКИ>"
   echo ""
-  echo "    Команда не отвечает — репозиторий приватный, и нужен ключ доступа."
-  echo "    Заводится он на GitHub (Settings -> Deploy keys), после чего:"
+  echo "    Если же ничего не нашлось — проверьте, публичный ли репозиторий:"
+  echo ""
+  echo "      curl -sI https://github.com/KlachoW666/my-ru-r-a-s | head -1"
+  echo ""
+  echo "    Отвечает 404 — репозиторий стал приватным, и нужен ключ доступа"
+  echo "    (GitHub -> Settings -> Deploy keys), после чего:"
   echo ""
   echo "      git remote set-url $REMOTE git@github.com:KlachoW666/my-ru-r-a-s.git"
+  echo ""
+  warn "что настроено сейчас:"
+  git config --show-origin --get-regexp 'credential|extraheader|insteadOf' 2>/dev/null \
+    | sed 's/^/        /' || echo "        (ничего не найдено)"
   echo ""
   die "обновление кода прервано"
 fi
