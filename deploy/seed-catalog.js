@@ -7,10 +7,16 @@
  *   node deploy/seed-catalog.js                 посмотреть, что будет, не писать
  *   node deploy/seed-catalog.js --apply         записать
  *   node deploy/seed-catalog.js --limit 200     только первые 200 (проверка)
+ *   node deploy/seed-catalog.js --probe         показать сырой ответ API
  *
  * Список берётся из полной выгрузки lis-skins, картинки и редкость — из Steam
  * GetAssetClassInfo по item_class_id, пачками по 100. Около 46 запросов и пары
  * минут на весь Rust вместо получаса постраничного обхода Market.
+ *
+ * Если выгрузка отвечает 403 — защита площадки режет её по адресу сервера, —
+ * список идёт через официальный API по ключу LISSKINS_API_KEY. Форма его
+ * ответа документацией не подтверждена, поэтому есть режим --probe: он
+ * печатает сырой ответ, чтобы подогнать разбор по факту.
  *
  * Каталог меняет экономику: от цен зависят выплаты и RTP кейсов, поэтому по
  * умолчанию скрипт ничего не пишет.
@@ -25,6 +31,8 @@ try { process.loadEnvFile(path.join(ROOT, '.env')); } catch {}
 const args = process.argv.slice(2);
 const APPLY = args.includes('--apply');
 
+const PROBE = args.includes('--probe');
+
 const li = args.indexOf('--limit');
 const LIMIT = li !== -1 && args[li + 1] ? Number(args[li + 1]) : 0;
 
@@ -37,17 +45,44 @@ if (args.includes('-h') || args.includes('--help')) {
 
 const catalog = require(path.join(ROOT, 'services', 'steamCatalog'));
 const seeder = require(path.join(ROOT, 'services', 'catalogSeed'));
+const lisApi = require(path.join(ROOT, 'services', 'lisSkinsApi'));
 
 const num = (n) => Number(n || 0).toLocaleString('ru-RU');
 
+/*
+ * Показать сырой ответ API. Форма ответа /market/search документацией не
+ * подтверждена, и разбор в lisSkinsApi намеренно терпимый; этот режим нужен,
+ * чтобы подогнать его по факту.
+ */
+async function runProbe() {
+  console.log('');
+  console.log(`  Хост:  ${lisApi.BASE}`);
+  const r = await lisApi.probe();
+  if (!r.ok) {
+    console.error(`  Не получилось: ${r.message || ('HTTP ' + r.status)}`);
+    console.error('');
+    console.error('  Ключ берётся в личном кабинете lis-skins и кладётся в .env:');
+    console.error('    LISSKINS_API_KEY=...');
+    console.error('');
+    process.exit(1);
+  }
+  console.log(`  Схема авторизации: ${r.scheme}`);
+  console.log('');
+  console.log(JSON.stringify(r.body, null, 2).slice(0, 4000));
+  console.log('');
+  process.exit(0);
+}
+
 (async () => {
+  if (PROBE) return runProbe();
+
   const db = catalog.openDb();
   if (!db) { console.error('Не открылась база'); process.exit(1); }
   // Обход Steam работает параллельно и держит базу — ждём, а не падаем.
   db.configure('busyTimeout', 15000);
 
   console.log('');
-  console.log('  Список:     lis-skins, полная выгрузка');
+  console.log('  Список:     lis-skins (выгрузка, при отказе — API по ключу)');
   console.log('  Картинки и редкость: Steam GetAssetClassInfo');
   console.log(`  Режим:      ${APPLY ? 'ЗАПИСЬ' : 'только просмотр'}`);
   if (LIMIT) console.log(`  Ограничение: ${num(LIMIT)} предметов`);

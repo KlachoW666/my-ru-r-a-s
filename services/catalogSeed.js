@@ -32,6 +32,7 @@
  */
 
 const catalog = require('./steamCatalog');
+const lisApi = require('./lisSkinsApi');
 
 const FULL_URL = String(process.env.LISSKINS_FULL_URL
   || 'https://lis-skins.com/market_export_json/api_rust_full.json');
@@ -61,7 +62,39 @@ const all = (db, sql, p = []) => new Promise((res, rej) =>
  * @returns {Promise<{ok: boolean, items?: Array, message?: string}>}
  *          items: [{ classid, name, usd }]
  */
+/**
+ * Список предметов: сначала открытая выгрузка, при отказе — официальный API.
+ *
+ * Открытая выгрузка ключа не требует и приходит одним запросом, поэтому она
+ * первая. Но защита площадки режет её по адресу клиента: рабочему серверу она
+ * отвечает 403 даже с браузерными заголовками. Хост api.lis-skins.com с того
+ * же сервера доступен, так что при 403 переходим на него — если задан
+ * LISSKINS_API_KEY.
+ */
 async function fetchCatalogList() {
+  const direct = await fetchExport();
+  if (direct.ok) return direct;
+
+  if (!lisApi.isConfigured()) {
+    return {
+      ok: false,
+      message: direct.message
+             + '. Открытая выгрузка недоступна с этого адреса — задайте '
+             + 'LISSKINS_API_KEY в .env, и список пойдёт через официальный API'
+    };
+  }
+
+  console.log(`[Seed] Выгрузка недоступна (${direct.message}), беру список через API`);
+  const viaApi = await lisApi.fetchCatalogList({
+    onPage: ({ page, got, total }) =>
+      console.log(`[Seed] Страница ${page}: ${got} записей, уникальных ${total}`)
+  });
+  if (!viaApi.ok) return viaApi;
+  return { ...viaApi, noClass: 0, noPrice: 0, updatedAt: null };
+}
+
+/** Открытая выгрузка одним запросом. Ключа не требует, но режется по адресу. */
+async function fetchExport() {
   let body;
   try {
     const r = await fetch(FULL_URL, {
