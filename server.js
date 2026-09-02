@@ -2886,6 +2886,38 @@ server.listen(PORT, async () => {
   setTimeout(refreshRates, 5000).unref?.();
   setInterval(refreshRates, rates.RATES_TTL_MS).unref?.();
 
+  // Состояние каталога прямо в лог. Пустая таблица предметов проявляется
+  // на сайте странно: лента показывает один и тот же предмет из запасного
+  // списка, зашитого в код, и выглядит это как поломка вёрстки, а не как
+  // отсутствие данных. Лучше сказать прямо.
+  try {
+    const rows = await queryAdminDb(
+      `SELECT COUNT(*) AS total, SUM(CASE WHEN delisted = 1 THEN 1 ELSE 0 END) AS hidden FROM items`);
+    const total = Number(rows[0]?.total) || 0;
+    const hidden = Number(rows[0]?.hidden) || 0;
+    const usable = total - hidden;
+
+    if (usable > 0) {
+      console.log(` Каталог предметов: ${usable} доступно` + (hidden ? `, скрыто ${hidden}` : ''));
+    } else {
+      console.warn('');
+      console.warn(' [!] КАТАЛОГ ПУСТ — доступных предметов нет.');
+      console.warn(`     Всего строк в items: ${total}, из них скрыто: ${hidden}`);
+      if (total > 0 && hidden === total) {
+        console.warn('     Все предметы помечены снятыми с продажи. Снять пометку:');
+        console.warn('     UPDATE items SET delisted = 0 WHERE price_usd_cents IS NOT NULL;');
+      } else {
+        console.warn('     Предметов нет вовсе. Каталог набирается обходом Steam Market:');
+        console.warn(`     обход сейчас ${catalogEnabled ? 'включён, круг занимает около получаса' : 'ВЫКЛЮЧЕН (STEAM_CATALOG_SYNC=0)'}`);
+      }
+      console.warn('     Пока каталог пуст, сайт показывает запасной список из кода:');
+      console.warn('     лента из одного предмета, кейсы без содержимого.');
+      console.warn('');
+    }
+  } catch (e) {
+    console.warn(` [!] Не удалось прочитать каталог: ${e.message}`);
+  }
+
   console.log(` Каталог Steam: ${catalogEnabled
     ? `обход включён (${CATALOG_PAGE_SIZE} поз./запрос, интервал ${CATALOG_INTERVAL_MS} мс)`
     : 'выключен (STEAM_CATALOG_SYNC=0)'}`);
