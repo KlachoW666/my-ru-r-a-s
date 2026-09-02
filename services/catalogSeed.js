@@ -65,7 +65,13 @@ async function fetchCatalogList() {
   let body;
   try {
     const r = await fetch(FULL_URL, {
-      headers: { Accept: 'application/json' },
+      // Тот же браузерный набор, что и в lisSkins: Node-овский User-Agent
+      // защита площадки оценивает строже.
+      headers: {
+        'Accept': 'application/json, text/plain, */*',
+        'Accept-Language': 'ru-RU,ru;q=0.9,en;q=0.8',
+        'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/122.0.0.0 Safari/537.36'
+      },
       // 16 МБ по медленному каналу: минуты на скачивание — норма.
       signal: AbortSignal.timeout(180000)
     });

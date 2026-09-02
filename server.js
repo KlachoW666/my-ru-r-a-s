@@ -165,6 +165,23 @@ async function cached(key, ttlMs, producer) {
   return value;
 }
 
+/*
+ * Ошибка в async-обработчике express не доходит до next(), поэтому
+ * превращается в необработанный отказ промиса, а Node 20 на таком отказе
+ * завершает процесс. Так один запрос к избранному укладывал весь сайт, и pm2
+ * поднимал его по кругу — 242 перезапуска подряд.
+ *
+ * Логируем и продолжаем работать. Это страховка, а не замена исправлениям:
+ * каждая такая запись в логе — настоящая ошибка, её надо чинить.
+ *
+ * uncaughtException оставлен фатальным намеренно: после него состояние
+ * процесса не восстановить, и pm2 честнее перезапустить.
+ */
+process.on('unhandledRejection', (reason) => {
+  const e = reason instanceof Error ? reason : new Error(String(reason));
+  console.error('[Отказ без обработчика]', e.stack || e.message);
+});
+
 const app = express();
 const PORT = process.env.PORT || 3101;
 
@@ -1250,6 +1267,34 @@ app.get('/api/v1/user/stats', async (req, res) => {
 app.get('/api/v1/user/ban-status', (req, res) => {
   res.json({ status: "success", data: { banned: false } });
 });
+
+/*
+ * Таблица избранного.
+ *
+ * Её создаёт этот сервер, а не админка: у админки своей вкладки избранного
+ * нет, а фронт дёргает /user/favorites при загрузке страницы. Пока функции
+ * не было, каждый такой запрос ронял процесс с ReferenceError — express не
+ * ловит ошибки async-обработчиков, а Node 20 на необработанном отказе
+ * завершается. Отсюда и были сотни перезапусков под pm2.
+ *
+ * user_id хранится строкой: идентификаторы приходят и числом, и строкой
+ * SteamID, а сравнение в запросах идёт через String(user.id).
+ */
+let favoritesSchemaReady = false;
+async function ensureFavoritesSchema() {
+  if (favoritesSchemaReady) return;
+  await new Promise((resolve) => {
+    const db = getAdminDb();
+    if (!db) return resolve();
+    db.run(`CREATE TABLE IF NOT EXISTS user_favorites (
+      id INTEGER PRIMARY KEY AUTOINCREMENT,
+      user_id TEXT NOT NULL,
+      case_slug TEXT NOT NULL,
+      created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+      UNIQUE(user_id, case_slug))`, () => { db.close(); resolve(); });
+  });
+  favoritesSchemaReady = true;
+}
 
 // Избранное хранится в user_favorites, а не подставляется первым кейсом.
 app.get('/api/v1/user/favorites', async (req, res) => {

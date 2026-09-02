@@ -59,11 +59,16 @@ function pickPrice(item) {
 async function fetchAll() {
   try {
     const r = await fetch(API_URL, {
-      headers: { Accept: 'application/json' },
+      headers: BROWSER_HEADERS,
       signal: AbortSignal.timeout(120000)
     });
     if (!r.ok) {
       console.error(`[LisSkins] GET -> ${r.status}`);
+      if (r.status === 403) {
+        console.error('[LisSkins] 403 — выгрузка открыта без ключа, значит режет');
+        console.error('[LisSkins] защита площадки по адресу сервера. Проверьте');
+        console.error(`[LisSkins] с самого сервера: curl -I ${API_URL}`);
+      }
       return { ok: false, status: r.status, error: 'API_ERROR', message: `HTTP ${r.status}` };
     }
     const body = await r.json();
