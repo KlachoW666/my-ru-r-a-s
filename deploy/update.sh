@@ -91,6 +91,31 @@ export GIT_LFS_SKIP_SMUDGE=1
 GIT_NOAUTH=(-c credential.helper=
             -c "http.https://github.com/.extraheader="
             -c "http.extraheader=")
+
+# Сколько раз повторять сетевую операцию git. GitHub периодически отвечает
+# отказом на анонимные запросы с адреса сервера — измерено: две попытки из
+# трёх подряд не проходят, а третья возвращает нужный коммит.
+GIT_RETRIES="${GIT_RETRIES:-6}"
+
+# Повтор с растущей паузой. Равномерные попытки при ограничении частоты
+# только продлевают его, поэтому 2, 4, 8, 16, 30, 30 секунд.
+git_retry() {
+  local delays="2 4 8 16 30 30"
+  local n=0 delay
+  for delay in $delays; do
+    n=$((n + 1))
+    [ "$n" -gt "$GIT_RETRIES" ] && break
+    if git "${GIT_NOAUTH[@]}" "$@"; then
+      [ "$n" -gt 1 ] && info "получилось с попытки $n"
+      return 0
+    fi
+    if [ "$n" -lt "$GIT_RETRIES" ]; then
+      warn "попытка $n не прошла, повтор через ${delay} с"
+      sleep "$delay"
+    fi
+  done
+  return 1
+}
 SITE_SERVICE="${SITE_SERVICE:-titanrust}"
 ADMIN_SERVICE="${ADMIN_SERVICE:-titanrust-admin}"
 BACKUP_DIR="${BACKUP_DIR:-$APP_DIR/backups}"
@@ -299,7 +324,7 @@ case "$REMOTE_URL" in
   https://*@github.com/*)
     CLEAN_URL="https://github.com/${REMOTE_URL#*@github.com/}"
     info "в адресе репозитория вшит логин, из-за него git и спрашивал пароль"
-    if git "${GIT_NOAUTH[@]}" ls-remote --exit-code "$CLEAN_URL" "$BRANCH" >/dev/null 2>&1; then
+    if git_retry ls-remote --exit-code "$CLEAN_URL" "$BRANCH" >/dev/null 2>&1; then
       run git remote set-url "$REMOTE" "$CLEAN_URL"
       REMOTE_URL="$CLEAN_URL"
       info "репозиторий публичный, логин убран: $CLEAN_URL"
@@ -310,12 +335,26 @@ case "$REMOTE_URL" in
     ;;
 esac
 
-if ! run git "${GIT_NOAUTH[@]}" fetch "$REMOTE" "$BRANCH" --tags; then
+if ! run git_retry fetch "$REMOTE" "$BRANCH" --tags; then
   echo ""
   warn "не удалось забрать код из $REMOTE"
   warn "адрес: ${REMOTE_URL:-неизвестен}"
   echo ""
-  echo "    Обновление уже пробовало забрать код без авторизации — не помогло."
+  echo "    Код не забрался за $GIT_RETRIES попыток с паузами."
+  echo ""
+  echo "    Замечено на этом сервере: GitHub периодически отвечает отказом на"
+  echo "    анонимные git-запросы, хотя репозиторий публичный и curl к нему"
+  echo "    проходит. Обычно спасает повтор, но если не спас — надёжнее уйти с"
+  echo "    анонимного доступа на ключ, он под эти ограничения не попадает:"
+  echo ""
+  echo "      ssh-keygen -t ed25519 -C satchel-deploy -f ~/.ssh/satchel_deploy -N ''"
+  echo "      cat ~/.ssh/satchel_deploy.pub"
+  echo ""
+  echo "    Ключ добавить на GitHub: Settings -> Deploy keys (read-only), затем:"
+  echo ""
+  echo "      git remote set-url $REMOTE git@github.com:KlachoW666/my-ru-r-a-s.git"
+  echo ""
+  echo "    Если же дело всё-таки в настройках, посмотреть их можно так:"
   echo "    Значит учётные данные подставляются откуда-то ещё. Показать откуда:"
   echo ""
   echo "      git config --show-origin --get-regexp 'credential|extraheader|insteadOf'"
