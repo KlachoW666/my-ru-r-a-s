@@ -47,12 +47,12 @@ const { verifyMailer } = require('./services/mailer');
 const { makeBattlesService } = require('./services/battles');
 const { makeDepositsService } = require('./services/deposits');
 const { makeWalletConfig } = require('./services/walletConfig');
-const steamData = require('./services/steamDataApi');
+const lisSkins = require('./services/lisSkins');
 const { makeRatesService } = require('./services/rates');
 
-// Как часто тянуть цены. Сервис пересчитывает их каждые 5 минут, чаще смысла
-// нет. 0 — не обновлять автоматически, только вручную deploy/prices.js.
-const PRICE_REFRESH_MS = Number(process.env.STEAMDATA_REFRESH_MS || 15 * 60 * 1000);
+// Как часто тянуть цены. 0 — не обновлять автоматически, только вручную
+// через deploy/prices.js.
+const PRICE_REFRESH_MS = Number(process.env.PRICE_REFRESH_MS || 30 * 60 * 1000);
 const rollypay = require('./services/rollypay');
 const { makeGiveawaysService } = require('./services/giveaways');
 const { makeInventoryService } = require('./services/inventory');
@@ -2841,28 +2841,28 @@ server.listen(PORT, async () => {
   console.log(` Steam return_to:           ${PUBLIC_URL}/api/v1/auth/steam/return`);
   console.log(` Admin DB Connected: ${ADMIN_DB_PATH}`);
   console.log(` WebSocket /ws Active on Port ${PORT}`);
-  // Обновление цен из steamdataapi. Весь каталог приходит одним запросом,
+  // Обновление цен из lis-skins. Весь каталог приходит одним запросом,
   // поэтому это можно делать часто — в отличие от обхода Steam Market, где
   // круг по 543 запроса занимает около получаса.
   //
-  // Редкость здесь не трогается: в этом API её нет, и берётся она только из
-  // name_color при обходе Steam. Поэтому обход остаётся включённым — он ищет
-  // новые предметы и проставляет им редкость, просто теперь не спешит.
-  if (steamData.isConfigured() && PRICE_REFRESH_MS > 0) {
+  // Редкость и картинки здесь не трогаются: в выгрузке их нет, и берутся они
+  // только из обхода Steam Market. Поэтому обход остаётся включённым — он ищет
+  // новые предметы и задаёт им редкость, просто больше не отвечает за цены.
+  if (PRICE_REFRESH_MS > 0) {
     const refresh = async () => {
       try {
         const db = openCatalogDb();
         if (!db) return;
         await refreshFxRate();
-        const r = await steamData.refreshPrices({
+        const r = await lisSkins.refreshPrices({
           db,
           run: (d, sql, prm) => new Promise((res) => d.run(sql, prm, function (e) { res(e ? null : this); })),
           all: (d, sql, prm) => new Promise((res) => d.all(sql, prm, (e, rows) => res(e ? [] : rows || []))),
-          usdCentsToRub
+          usdToRub: (usd) => usdCentsToRub(Math.round(Number(usd) * 100))
         });
         db.close();
         if (r.ok) {
-          console.log(`[Цены] Обновлено ${r.updated} из ${r.fromApi}, картинок ${r.imagesFixed}, сдвиг ${r.shiftPercent}%`);
+          console.log(`[Цены] Обновлено ${r.updated} из ${r.fromApi}, сдвиг ${r.shiftPercent}%`);
         } else {
           console.warn(`[Цены] Не обновились: ${r.message}`);
         }
@@ -2889,9 +2889,9 @@ server.listen(PORT, async () => {
   console.log(` Каталог Steam: ${catalogEnabled
     ? `обход включён (${CATALOG_PAGE_SIZE} поз./запрос, интервал ${CATALOG_INTERVAL_MS} мс)`
     : 'выключен (STEAM_CATALOG_SYNC=0)'}`);
-  console.log(` Цены steamdataapi: ${steamData.isConfigured()
-    ? `каждые ${Math.round(PRICE_REFRESH_MS / 60000)} мин, поле «${steamData.PRICE_FIELD}»`
-    : 'выключены (STEAMDATA_API_KEY не задан)'}`);
+  console.log(` Цены lis-skins: ${PRICE_REFRESH_MS > 0
+    ? `каждые ${Math.round(PRICE_REFRESH_MS / 60000)} мин, поле «${lisSkins.PRICE_FIELD}»`
+    : 'только вручную (PRICE_REFRESH_MS=0)'}`);
   if (ALLOW_MOCK_AUTH) {
     console.log(` [!] ALLOW_MOCK_AUTH включён — без токена отдаётся моковый профиль.`);
     console.log(`     В проде запускать с NODE_ENV=production.`);

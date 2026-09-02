@@ -2,22 +2,22 @@
 'use strict';
 
 /**
- * Обновление цен каталога.
+ * Обновление цен каталога из lis-skins.com.
  *
- * Смена источника цен меняет экономику: от цены предмета зависят выплаты,
- * RTP кейсов и стоимость входа в баттлы. Поэтому по умолчанию скрипт ничего
- * не пишет — только показывает, что изменится.
+ * Смена цен меняет экономику: от стоимости предмета зависят выплаты, RTP
+ * кейсов и цена входа в баттлы. Поэтому по умолчанию скрипт ничего не пишет —
+ * только показывает, что изменится.
  *
- *   node deploy/prices.js                 сравнить, ничего не менять
- *   node deploy/prices.js --apply         записать новые цены
- *   node deploy/prices.js --field best    посмотреть другое поле цены
- *   node deploy/prices.js --source steamdata   другой источник
+ *   node deploy/prices.js                          сравнить, ничего не менять
+ *   node deploy/prices.js --apply                  записать новые цены
+ *   node deploy/prices.js --field unlocked_price   другое поле цены
  *
- * По умолчанию берутся цены lis-skins: ключ не нужен, весь каталог Rust
- * приходит одним запросом. Альтернатива — steamdataapi, но ей нужен ключ.
+ * Сервер делает то же самое сам, раз в полчаса (PRICE_REFRESH_MS). Скрипт
+ * нужен, чтобы посмотреть расхождение до того, как оно применится, и чтобы
+ * обновить цены разово, не дожидаясь таймера.
  *
- * Редкость, цвет и картинки не трогаются никогда: их источник — обход Steam
- * Market, а в этих выгрузках редкости нет вовсе.
+ * Редкость, цвет и картинки не трогаются никогда: в выгрузке lis-skins их нет,
+ * их источник — обход Steam Market.
  */
 
 const path = require('path');
@@ -26,27 +26,17 @@ try { process.loadEnvFile(path.join(ROOT, '.env')); } catch {}
 
 const args = process.argv.slice(2);
 const APPLY = args.includes('--apply');
+
 const fieldIdx = args.indexOf('--field');
-if (fieldIdx !== -1 && args[fieldIdx + 1]) {
-  process.env.STEAMDATA_PRICE_FIELD = args[fieldIdx + 1];
-  process.env.LISSKINS_PRICE_FIELD = args[fieldIdx + 1];
+if (fieldIdx !== -1 && args[fieldIdx + 1]) process.env.LISSKINS_PRICE_FIELD = args[fieldIdx + 1];
+
+if (args.includes('-h') || args.includes('--help')) {
+  console.log(require('fs').readFileSync(__filename, 'utf8').split('*/')[0].replace(/^\/\*\*?|^ \* ?/gm, '').trim());
+  process.exit(0);
 }
 
 const catalog = require(path.join(ROOT, 'services', 'steamCatalog'));
-
-/*
- * Источник цен. lis-skins не требует ключа и отдаёт весь каталог Rust одним
- * запросом, поэтому он по умолчанию. steamdataapi — альтернатива, но ей нужен
- * ключ. Переключается флагом --source или переменной PRICE_SOURCE.
- */
-const SOURCE = String(
-  (args.indexOf('--source') !== -1 && args[args.indexOf('--source') + 1]) ||
-  process.env.PRICE_SOURCE || 'lisskins'
-).toLowerCase();
-
-const api = SOURCE === 'steamdata'
-  ? require(path.join(ROOT, 'services', 'steamDataApi'))
-  : require(path.join(ROOT, 'services', 'lisSkins'));
+const api = require(path.join(ROOT, 'services', 'lisSkins'));
 
 const run = (db, sql, p = []) => new Promise((res) => db.run(sql, p, function (e) { res(e ? null : this); }));
 const all = (db, sql, p = []) => new Promise((res) => db.all(sql, p, (e, r) => res(e ? [] : r || [])));
@@ -54,34 +44,21 @@ const all = (db, sql, p = []) => new Promise((res) => db.all(sql, p, (e, r) => r
 const money = (n) => Math.round(n).toLocaleString('ru-RU') + ' ₽';
 
 (async () => {
-  if (!api.isConfigured()) {
-    console.error('');
-    console.error('  Источник цен не настроен.');
-    console.error('  Для steamdataapi нужен ключ: https://steamdataapi.com/app');
-    console.error('  Либо переключитесь на lis-skins, ему ключ не нужен:');
-    console.error('      node deploy/prices.js --source lisskins');
-    console.error('');
-    process.exit(1);
-  }
-
   const db = catalog.openDb();
   if (!db) { console.error('Не открылась база'); process.exit(1); }
 
   await catalog.ensureCatalogSchema(db);
-  // Курс нужен до пересчёта: цены приходят в центах USD.
+  // Курс нужен до пересчёта: цены в выгрузке долларовые.
   await catalog.refreshFxRate();
 
   console.log('');
-  console.log(`  Источник:   ${SOURCE === 'steamdata' ? 'steamdataapi.com' : 'lis-skins.com'}`);
+  console.log('  Источник:   lis-skins.com');
   console.log(`  Поле цены:  ${api.PRICE_FIELD}`);
   console.log(`  Режим:      ${APPLY ? 'ЗАПИСЬ' : 'только сравнение'}`);
   console.log('  Загружаю каталог одним запросом…');
 
   const r = await api.refreshPrices({
     db, run, all,
-    // У источников разные единицы: steamdataapi отдаёт центы, lis-skins —
-    // доллары. Передаём обе функции, каждый берёт свою.
-    usdCentsToRub: catalog.usdCentsToRub,
     usdToRub: (usd) => catalog.usdCentsToRub(Math.round(Number(usd) * 100)),
     dryRun: !APPLY
   });
@@ -93,23 +70,22 @@ const money = (n) => Math.round(n).toLocaleString('ru-RU') + ' ₽';
   }
 
   console.log('');
-  console.log(`  Пришло из API:      ${r.fromApi}`);
-  console.log(`  Есть в каталоге:    ${r.inCatalog}`);
+  console.log(`  Пришло из выгрузки:  ${r.fromApi}`);
+  console.log(`  Есть в каталоге:     ${r.inCatalog}`);
   console.log(`  Совпало и обновится: ${r.updated}`);
-  console.log(`  Нет у нас:          ${r.unknown}  (заводит их обход Steam, здесь нет редкости)`);
-  console.log(`  Без цены:           ${r.skipped}`);
-  if (r.imagesFixed != null) console.log(`  Картинок починится: ${r.imagesFixed}`);
+  console.log(`  Нет у нас:           ${r.unknown}  (заводит их обход Steam — здесь нет редкости)`);
+  console.log(`  Без цены:            ${r.skipped}`);
   console.log('');
-  console.log(`  Сумма каталога было:  ${money(r.sumOld)}`);
-  console.log(`  Станет:               ${money(r.sumNew)}`);
-  console.log(`  Сдвиг:                ${r.shiftPercent > 0 ? '+' : ''}${r.shiftPercent}%   (дороже ${r.grew}, дешевле ${r.fell})`);
-  if (r.cachedAt || r.updatedAt) console.log(`  Данные на:            ${r.cachedAt || r.updatedAt}`);
+  console.log(`  Сумма каталога была: ${money(r.sumOld)}`);
+  console.log(`  Станет:              ${money(r.sumNew)}`);
+  console.log(`  Сдвиг:               ${r.shiftPercent > 0 ? '+' : ''}${r.shiftPercent}%   (дороже ${r.grew}, дешевле ${r.fell})`);
+  if (r.updatedAt) console.log(`  Данные на:           ${r.updatedAt}`);
 
   if (r.biggest.length) {
     console.log('');
     console.log('  Сильнее всего разойдутся:');
     for (const b of r.biggest) {
-      console.log(`    ${String(b.diff + '%').padStart(5)}  ${money(b.oldRub).padStart(12)} -> ${money(b.rub).padStart(12)}  ${b.name}`);
+      console.log(`    ${String(b.diff + '%').padStart(6)}  ${money(b.oldRub).padStart(12)} -> ${money(b.rub).padStart(12)}  ${b.name}`);
     }
   }
 
@@ -118,11 +94,12 @@ const money = (n) => Math.round(n).toLocaleString('ru-RU') + ' ₽';
     console.log('  Ничего не записано. Устраивает — повторите с --apply');
     if (Math.abs(r.shiftPercent) > 15) {
       console.log('');
-      console.log(`  ! Сдвиг ${r.shiftPercent}% заметный. Он сдвинет и RTP кейсов:`);
-      console.log('    после записи проверьте curl -s http://127.0.0.1:3101/api/v1/cases/health');
+      console.log(`  ! Сдвиг ${r.shiftPercent}% заметный, он сдвинет и RTP кейсов.`);
+      console.log('    После записи проверьте:');
+      console.log('    curl -s http://127.0.0.1:3101/api/v1/cases/health');
     }
   } else {
-    console.log('  Цены записаны. Редкость и цвет не тронуты.');
+    console.log('  Цены записаны. Редкость, цвет и картинки не тронуты.');
   }
   console.log('');
   db.close();
