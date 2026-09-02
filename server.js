@@ -141,10 +141,22 @@ async function adminSetting(key, fallback = {}) {
 // нужно, — не дёргать базу на каждый запрос. TTL 30 с: именно с такой частотой
 // пользователь и видит обновления.
 const _cache = new Map();
+
+/*
+ * Пометка «этот ответ не класть в кэш». Нужна для аварийных путей: сбой базы
+ * на миллисекунду не должен фиксировать сломанный ответ на весь TTL.
+ */
+const _noCache = new WeakSet();
+function NO_CACHE(value) {
+  if (value && typeof value === 'object') _noCache.add(value);
+  return value;
+}
+
 async function cached(key, ttlMs, producer) {
   const hit = _cache.get(key);
   if (hit && Date.now() - hit.at < ttlMs) return hit.value;
   const value = await producer();
+  if (_noCache.has(value)) return value;
   _cache.set(key, { at: Date.now(), value });
   if (_cache.size > 500) {                       // простая защита от разрастания
     const oldest = [..._cache.entries()].sort((a, b) => a[1].at - b[1].at)[0];
@@ -211,19 +223,42 @@ app.use((req, res, next) => {
 function getAdminDb() {
   if (fs.existsSync(ADMIN_DB_PATH)) {
     const sqlite3 = require(path.join(__dirname, 'admin.titanrust.ru', 'server', 'node_modules', 'sqlite3')).verbose();
-    return new sqlite3.Database(ADMIN_DB_PATH);
+    const db = new sqlite3.Database(ADMIN_DB_PATH);
+    /*
+     * Без таймаута любой SELECT, попавший на запись обхода Steam, немедленно
+     * получает SQLITE_BUSY. Дальше ошибка превращалась в пустой результат, и
+     * каталог из 5400 предметов подменялся аварийным списком из трёх — именно
+     * поэтому лента показывала одно и то же. Пять секунд ожидания дешевле.
+     */
+    db.configure('busyTimeout', 5000);
+    return db;
   }
   return null;
 }
 
+/*
+ * Возвращает строки. При ошибке — пустой массив, но с записью в лог и с
+ * пометкой `failed`, чтобы вызывающий мог отличить «база не ответила» от
+ * «в таблице пусто». Раньше эти два случая были неразличимы, и сбой базы
+ * молча деградировал в подстановку заглушек.
+ */
 function queryAdminDb(sql, params = []) {
   return new Promise((resolve) => {
     const db = getAdminDb();
-    if (!db) return resolve([]);
+    if (!db) {
+      const empty = [];
+      empty.failed = true;
+      return resolve(empty);
+    }
     db.all(sql, params, (err, rows) => {
       db.close();
-      if (err) resolve([]);
-      else resolve(rows || []);
+      if (err) {
+        console.error(`[DB] ${err.code || 'ERROR'}: ${err.message} | ${String(sql).replace(/\s+/g, ' ').trim().slice(0, 90)}`);
+        const empty = [];
+        empty.failed = true;
+        return resolve(empty);
+      }
+      resolve(rows || []);
     });
   });
 }
@@ -238,8 +273,22 @@ async function getLiveItems() {
 async function _getLiveItemsUncached() {
   let rows = await queryAdminDb(`SELECT * FROM items WHERE delisted = 0 ORDER BY price DESC`);
   // Колонки delisted может ещё не быть — до первой миграции каталога.
-  if (!rows || rows.length === 0) {
+  if (!rows.failed && rows.length === 0) {
     rows = await queryAdminDb(`SELECT * FROM items ORDER BY price DESC`);
+  }
+  /*
+   * База не ответила — это не «каталог пуст». Отдаём то, что уже лежит в кэше,
+   * пусть и просроченное: показать вчерашние цены честнее, чем подменить весь
+   * каталог тремя заглушками. И такой ответ кэшировать нельзя, иначе сбой
+   * длиной в миллисекунду держал бы ленту сломанной полминуты.
+   */
+  if (rows.failed) {
+    const stale = _cache.get('liveItems');
+    if (stale && Array.isArray(stale.value) && stale.value.length) {
+      console.error('[Каталог] База не ответила, отдаю прошлый результат');
+      return NO_CACHE(stale.value);
+    }
+    console.error('[Каталог] База не ответила и кэш пуст, отдаю аварийный список');
   }
   if (rows && rows.length > 0) {
     return rows.map(r => ({
@@ -276,6 +325,42 @@ async function getLiveSeries() {
   const dbCases = await queryAdminDb(`SELECT * FROM cases WHERE archived = 0 ORDER BY sortOrder ASC`);
   const items = await getLiveItems();
 
+  /*
+   * Состав кейсов — одним запросом на все кейсы сразу.
+   *
+   * Здесь раньше каждому кейсу подставлялось `items.slice(0, 10)` — голова
+   * общего каталога, отсортированного по цене. То есть все кейсы показывали
+   * один и тот же десяток самых дорогих предметов, а лента выпадений, которая
+   * берёт предметы отсюда, повторяла одно и то же. Настоящий состав всё это
+   * время лежал в case_items и не читался.
+   *
+   * Запрос один на все кейсы, а не по одному на кейс: getAdminDb открывает под
+   * каждый вызов отдельное соединение, а getLiveSeries дёргается с главной.
+   */
+  const composition = new Map();
+  const compRows = await queryAdminDb(`
+    SELECT ci.case_id, ci.item_id, ci.chance,
+           i.name, i.price, i.image, i.rarity, i.color, i.market_hash_name
+    FROM case_items ci
+    JOIN items i ON i.id = ci.item_id
+    WHERE i.delisted = 0 OR i.delisted IS NULL
+    ORDER BY ci.case_id ASC, i.price DESC
+  `);
+  for (const r of compRows) {
+    if (!composition.has(r.case_id)) composition.set(r.case_id, []);
+    composition.get(r.case_id).push({
+      id: `db-${r.item_id}`,
+      name: r.name || r.market_hash_name,
+      marketHashName: r.market_hash_name,
+      price: r.price || 100,
+      priceText: `${r.price || 100} ₽`,
+      image: fixImageUrl(r.image),
+      rarity: (r.rarity || 'rare').toLowerCase(),
+      colorHex: r.color ? (String(r.color).startsWith('#') ? r.color : `#${r.color}`) : '#35a3f1',
+      chance: Number(r.chance) || 0
+    });
+  }
+
   // Helper to format case object for Vue frontend
   const formatCase = (c) => {
     const sId = c.seriesId ? parseInt(c.seriesId, 10) : (c.series_id ? parseInt(c.series_id, 10) : 1);
@@ -294,7 +379,9 @@ async function getLiveSeries() {
       volatility: c.volatility || "AVERAGE",
       isBlogger: c.isBlogger === 1,
       seriesId: sId,
-      items: items.slice(0, 10)
+      // Свой состав кейса. Пустой он бывает у только что созданного в админке
+      // кейса — тогда показываем образец каталога, иначе плитка была бы голой.
+      items: composition.get(c.id) || items.slice(0, 10)
     };
   };
 
