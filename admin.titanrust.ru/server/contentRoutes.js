@@ -60,7 +60,27 @@ function register({app,DB_PATH,requireAdminJWT}) {
         if(transaction)await db.run('ROLLBACK').catch(()=>{});
         const status=e.status||(e.code==='SQLITE_CONSTRAINT'?409:500);
         if(status===500)console.error('[Content]',e);
-        res.status(status).json({success:false,message:e.status?e.message:status===409?'Запись с таким идентификатором уже существует':'Не удалось обработать контент'});
+        /*
+         * Причина ошибки уходит в ответ, а не только в лог.
+         *
+         * Раньше на любую непредвиденную ошибку админка получала
+         * «Не удалось обработать контент», а настоящий текст оставался в
+         * логе сервера. Со стороны оператора это выглядит как «Server error,
+         * попробуйте позже» — по такому сообщению нельзя ни понять причину,
+         * ни внятно её передать.
+         *
+         * Показывать текст здесь безопасно: раздел за админской авторизацией,
+         * и читает его тот, кто и должен разбираться. Код ошибки SQLite
+         * («no such column», «SQLITE_BUSY») сразу называет виновника.
+         */
+        const detail=status===500&&e&&e.message?`: ${e.message}`:'';
+        res.status(status).json({
+          success:false,
+          message:e.status?e.message:status===409
+            ?'Запись с таким идентификатором уже существует'
+            :`Не удалось обработать контент${detail}`,
+          code:e.code||undefined
+        });
       } finally {if(db)await db.close();}
     });
   }
