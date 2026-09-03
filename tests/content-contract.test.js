@@ -55,6 +55,30 @@ test('old series schema migrates before list and schedule queries',async t=>{
   assert.equal((await f.dbGet('SELECT sortOrder FROM series WHERE id=1')).sortOrder,7);
 });
 
+test('picker price comparisons filter before pagination',async t=>{
+  const f=await fixture(t);
+  await f.dbRun("INSERT INTO items(id,name,market_hash_name,price,rarity) VALUES(3,'AK boundary','AK boundary',10000,'RARE'),(4,'AK above','AK above',10000.01,'RARE'),(5,'AK below','AK below',9999.99,'RARE')");
+  const r=await f.request('GET','/cases/catalog-items?name=AK&priceMin=10000&sortDir=asc&limit=1');
+  assert.equal(r.body.data[0].id,3);assert.equal(r.body.pagination.total,2);
+  const lt=await f.request('GET','/cases/catalog-items?name=AK&priceLt=10000');
+  assert.deepEqual(lt.body.data.map(i=>i.id),[5]);
+  const gt=await f.request('GET','/cases/catalog-items?name=AK&priceGt=10000');
+  assert.deepEqual(gt.body.data.map(i=>i.id),[4]);
+});
+
+test('auto RTP survives case save and matches the game distribution',async t=>{
+  const f=await fixture(t);
+  const {solveCaseRtp}=await import('../admin.titanrust.ru/public/assets/case-form-tools.mjs');
+  const solved=solveCaseRtp([{id:1,price:10},{id:2,price:90}],80);
+  assert.equal(solved.feasible,true);
+  const saved=await f.request('PUT','/cases/1',{name:'Active',price:80,items:solved.items});
+  assert.equal(saved.status,200,JSON.stringify(saved.body));
+  const items=await f.dbAll('SELECT i.*,ci.chance,ci.ticketRangeFrom,ci.ticketRangeTo FROM case_items ci JOIN items i ON i.id=ci.item_id WHERE ci.case_id=1');
+  const distribution=require('../services/drops').buildDistribution(items,{casePrice:80});
+  assert.equal(distribution.source,'tickets');
+  assert.ok(Math.abs(distribution.ev/80-.96)<.00001);
+});
+
 async function fixture(t) {
   const dir=fs.mkdtempSync(path.join(os.tmpdir(),'titan-content-'));
   const DB_PATH=path.join(dir,'test.sqlite');

@@ -8,7 +8,9 @@ function iso(value) {
   return Number.isFinite(date.getTime()) ? date.toISOString() : null;
 }
 
-function register({ app, dbAll, dbGet, dbRun, requireAdminJWT }) {
+function register({ app, dbAll, dbGet, dbRun, requireAdminJWT,
+  getAdminDb = () => new (require('sqlite3').Database)(require('path').join(__dirname,'database.sqlite')) }) {
+  const deposits = require('../../services/deposits').makeDepositsService({queryAdminDb:dbAll,getAdminDb});
   let schemaReady;
   function ensureSchema() {
     if (!schemaReady) schemaReady = ensureColumns({ all: dbAll, run: dbRun }, 'users')
@@ -132,11 +134,81 @@ function register({ app, dbAll, dbGet, dbRun, requireAdminJWT }) {
     return { id: String(row.id), type: row.type, amount: money(row.amount), reason: row.comment, createdAt: iso(row.created_at) };
   }
   app.get('/api/v1/admin/wallet/:id([0-9]+)', requireAdminJWT, forUser(async (req, res, row) => {
-    ok(res, { wallet: { userId: String(row.id), balance: money(row.balance), wager: null,
+    const state=await hasTable('wallet_wagers') ? await dbGet('SELECT remaining_cents FROM wallet_wagers WHERE user_id=?',[row.id]) : null;
+    ok(res, { wallet: { userId: String(row.id), balance: money(row.balance), wager: {
+      remaining:money(Number(state?.remaining_cents||0)/100),hasActiveWager:Number(state?.remaining_cents||0)>0},
       recentTransactions: (await ledger(row.id)).slice(0,50).map(transaction) } });
   }));
+  for(const route of ['/wallet/:id/adjust','/wallet/:id/manual-deposit']) {
+    app.post('/api/v1/admin'+route,requireAdminJWT,forUser(async(req,res,row)=>{
+      if (req.user?.role !== 'SUPER_ADMIN') return fail(res,403,'Корректировка доступна только SUPER_ADMIN');
+      if (req.body?.action && req.body.action!=='CREDIT') return fail(res,501,'Ручное списание пока не подключено. Баланс не изменён.');
+      const result=await deposits.manualCredit({...req.body,userId:row.id,by:'admin:'+req.user.userId});
+      if (!result.ok) return fail(res,result.error==='IDEMPOTENCY_CONFLICT'?409:400,result.message);
+      const balance=await dbGet('SELECT balance FROM users WHERE id=?',[row.id]);
+      ok(res,{newBalance:money(balance.balance),deposit:result.deposit,replayed:Boolean(result.replayed),wager:await deposits.wager(row.id)});
+    }));
+  }
   const betTypes = ['case_open', 'battle_entry', 'upgrade'];
   const winTypes = ['case_win', 'battle_win', 'upgrade_win'];
+  const hasTable = async name => Boolean(await dbGet("SELECT name FROM sqlite_master WHERE type='table' AND name=?",[name]));
+  function history(req,res,items) {
+    const {page,limit}=pageOf(req.query);
+    const from=req.query.from ? iso(req.query.from) : null, to=req.query.to ? iso(req.query.to) : null;
+    if ((req.query.from&&!from)||(req.query.to&&!to)||(from&&to&&from>to)) return fail(res,400,'Некорректный период');
+    const filtered=items.filter(r=>(!from||r.createdAt>=from)&&(!to||r.createdAt<=to))
+      .sort((a,b)=>String(b.createdAt).localeCompare(String(a.createdAt))||String(b.id).localeCompare(String(a.id),undefined,{numeric:true}));
+    ok(res,{items:filtered.slice((page-1)*limit,page*limit),total:filtered.length,page,limit});
+  }
+  app.get('/api/v1/admin/wallet/:id/bets',requireAdminJWT,forUser(async(req,res,row)=>{
+    const types={case_open:'CASE',upgrade:'UPGRADER',battle_entry:'BATTLE'};
+    const rows=(await ledger(row.id)).filter(r=>betTypes.includes(r.type));
+    history(req,res,rows.map(r=>({id:String(r.id),type:types[r.type],betAmount:money(Math.abs(r.amount)),
+      winAmount:null,multiplier:null,houseEdge:null,isFree:false,caseName:null,
+      createdAt:iso(r.created_at),resultKnown:false,description:r.comment||'',source:'transactions'})));
+  }));
+  app.get('/api/v1/admin/wallet/:id/deposits',requireAdminJWT,forUser(async(req,res,row)=>{
+    const deposits=await hasTable('deposits') ? await dbAll('SELECT * FROM deposits WHERE user_id=?',[row.id]) : [];
+    const entries=deposits.map(r=>({id:String(r.uid||r.id),amount:money(r.amount),
+      creditedAmount:money(r.credited),promoBonusAmount:'0.00',conversionRate:null,
+      status:{paid:'COMPLETED',pending:'PENDING',rejected:'FAILED',expired:'EXPIRED',failed:'FAILED'}[r.status]||r.status,
+      provider:r.provider||r.method||null,methodCategory:r.method,asset:r.asset,network:r.network,
+      comment:r.comment||'',createdAt:iso(r.created_at),updatedAt:iso(r.settled_at||r.created_at),
+      grossAmount:money(r.amount),commissionAmount:null,txHash:r.provider_ref||null}));
+    const credits=(await ledger(row.id)).filter(r=>r.type==='deposit' && !deposits.some(d=>d.uid&&String(r.comment).includes('№'+d.uid)));
+    for(const r of credits) entries.push({id:'ledger-'+r.id,amount:money(r.amount),creditedAmount:money(r.amount),
+      promoBonusAmount:'0.00',conversionRate:null,status:'COMPLETED',provider:'Журнал операций',methodCategory:'legacy',
+      comment:r.comment||'',createdAt:iso(r.created_at),updatedAt:iso(r.created_at),grossAmount:money(r.amount),commissionAmount:null});
+    history(req,res,entries);
+  }));
+  app.get('/api/v1/admin/deposit-chain/users/:id',requireAdminJWT,forUser(async(req,res,row)=>{
+    const claims=await hasTable('deposit_chain_claims') ? await dbAll('SELECT * FROM deposit_chain_claims WHERE user_id=? ORDER BY tier_index',[row.id]) : [];
+    const deposited=(await ledger(row.id)).filter(r=>r.type==='deposit').reduce((n,r)=>n+Number(r.amount),0);
+    let tiers=[{threshold:0},{threshold:174},{threshold:384},{threshold:821},{threshold:1166}];
+    if(await hasTable('app_settings')) {
+      const config=await dbGet("SELECT value FROM app_settings WHERE key='deposit_chain'");
+      if(config?.value){const parsed=JSON.parse(config.value);if(Array.isArray(parsed.tiers)&&parsed.tiers.length)tiers=parsed.tiers;}
+    }
+    ok(res,{enrolled:true,variant:'A',enteredAt:iso(row.created_at),hasDepositsAtEntry:null,
+      totalDeposited:money(deposited),completed:tiers.every((_,i)=>claims.some(c=>c.tier_index===i)),qaEnrollmentAvailable:false,
+      claims:claims.map(c=>({tierIndex:c.tier_index,status:c.status,caseOpeningId:null,openedAt:iso(c.opened_at),adminUserId:c.admin_user_id||null})),
+      source:'shared_database',enrollmentModel:'all_registered_users'});
+  }));
+  app.post('/api/v1/admin/deposit-chain/users/:id/enroll',requireAdminJWT,forUser(async(req,res)=>{
+    fail(res,404,'QA-зачисление отключено: на сайте лестница доступна всем зарегистрированным пользователям');
+  }));
+  app.post('/api/v1/admin/deposit-chain/users/:id/claims/:tierIndex/void',requireAdminJWT,forUser(async(req,res,row)=>{
+    if(req.user?.role!=='SUPER_ADMIN')return fail(res,403,'Аннулирование доступно только SUPER_ADMIN');
+    const index=Number(req.params.tierIndex),reason=typeof req.body?.reason==='string'?req.body.reason.trim():'';
+    if(!Number.isInteger(index)||index<0||!reason||reason.length>128)return fail(res,400,'Укажите тир и причину длиной до 128 символов');
+    if(!await hasTable('deposit_chain_claims'))return fail(res,404,'Открытие не найдено');
+    const claim=await dbGet('SELECT * FROM deposit_chain_claims WHERE user_id=? AND tier_index=?',[row.id,index]);
+    if(!claim)return fail(res,404,'Открытие не найдено');
+    if(!['CONSUMED','CLAIMED'].includes(claim.status))return fail(res,409,'Открытие уже обработано');
+    await dbRun("UPDATE deposit_chain_claims SET status='VOIDED',admin_user_id=?,void_reason=? WHERE user_id=? AND tier_index=? AND status IN ('CONSUMED','CLAIMED')",
+      [String(req.user.userId),reason,row.id,index]);
+    ok(res,{tierIndex:index,status:'VOIDED',prizeReversed:false});
+  }));
   app.get('/api/v1/admin/wallet/:id/financial-stats', requireAdminJWT, forUser(async (req, res, row) => {
     const rows = await ledger(row.id);
     const select = types => rows.filter(r => types.includes(r.type));
@@ -185,7 +257,6 @@ function register({ app, dbAll, dbGet, dbRun, requireAdminJWT }) {
   // These controls previously returned fake success. Keep them explicit until the
   // shared financial/security services implement the operation end to end.
   for (const [method, route] of [
-    ['post','/wallet/:id/manual-deposit'], ['post','/wallet/:id/adjust'],
     ['patch','/users/:id/role'], ['put','/users/:id/analytics-exclusion'],
     ['get','/rtp/users/:id/tier'], ['put','/rtp/users/:id/tier'], ['post','/rtp/users/:id/tier/reset'],
     ['post','/deposit-chain/users/:id/enroll'], ['post','/deposit-chain/users/:id/claims/:tierIndex/void']

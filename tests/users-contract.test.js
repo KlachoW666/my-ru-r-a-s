@@ -70,7 +70,7 @@ async function fixture(t) {
   const end = source.indexOf("require('./bannerRoutes').register", start);
   assert.ok(start >= 0 && end > start);
   vm.runInNewContext(source.slice(start, end), { app, dbAll, dbGet, dbRun, require: createRequire(filename),
-    requireAdminJWT: (req, res, next) => req.headers['x-deny'] ? res.sendStatus(403) : next() });
+    requireAdminJWT: (req, res, next) => {req.user={userId:99,role:'SUPER_ADMIN'};return req.headers['x-deny'] ? res.sendStatus(403) : next();} });
   app.all('/api/v1/admin/*', (req, res) => res.json({ success: true, data: [], catchAll: true }));
   const server = app.listen(0, '127.0.0.1');
   await new Promise(resolve => server.once('listening', resolve));
@@ -84,6 +84,49 @@ async function fixture(t) {
   };
   return { request, dbGet, dbRun };
 }
+
+// AC19: the deployed tabs consume data.items, not an unhandled catch-all array.
+test('AC19: bets return actual ledger stakes',async t=>{
+  const {request}=await fixture(t);
+  const r=await request('/wallet/1/bets');
+  assert.equal(r.status,200);
+  assert.equal(r.body.catchAll,undefined);
+  assert.equal(r.body.data.total,1);
+  assert.equal(r.body.data.items[0].betAmount,'100.00');
+  assert.equal(r.body.data.items[0].type,'CASE');
+  // Legacy transactions have no round identifier: do not invent a win pairing.
+  assert.equal(r.body.data.items[0].winAmount,null);
+});
+test('AC20: deposits show legacy credits with UTC date filtering',async t=>{
+  const {request}=await fixture(t);
+  const r=await request('/wallet/1/deposits?from=2026-09-01T10:00:00Z&to=2026-09-01T10:00:00Z');
+  assert.equal(r.body.catchAll,undefined);
+  assert.equal(r.body.data.total,1);
+  assert.equal(r.body.data.items[0].amount,'200.00');
+  assert.equal((await request('/wallet/1/deposits?from=2026-09-02T00:00:00Z')).body.data.total,0);
+  assert.equal((await request('/wallet/1/bets?from=invalid')).status,400);
+  assert.equal((await request('/wallet/999/bets')).status,404);
+});
+
+test('AC21: ladder reflects the site participation model',async t=>{
+  const {request}=await fixture(t);
+  const r=await request('/deposit-chain/users/1');
+  assert.equal(r.body.catchAll,undefined);
+  assert.equal(r.body.data.enrolled,true);
+  assert.equal(r.body.data.totalDeposited,'200.00');
+  assert.deepEqual(r.body.data.claims,[]);
+  assert.equal(r.body.data.qaEnrollmentAvailable,false);
+});
+test('AC22: voiding a ladder claim does not reverse its prize',async t=>{
+  const {request,dbRun,dbGet}=await fixture(t);
+  await dbRun('CREATE TABLE deposit_chain_claims(user_id INTEGER,tier_index INTEGER,status TEXT,item_json TEXT,amount REAL,case_name TEXT,opened_at TEXT,admin_user_id TEXT,void_reason TEXT,PRIMARY KEY(user_id,tier_index))');
+  await dbRun("INSERT INTO deposit_chain_claims(user_id,tier_index,status,amount) VALUES(1,0,'CONSUMED',25)");
+  const r=await request('/deposit-chain/users/1/claims/0/void','POST',{reason:'Ошибка настройки'});
+  assert.equal(r.status,200);
+  assert.equal((await dbGet('SELECT status FROM deposit_chain_claims')).status,'VOIDED');
+  assert.equal((await dbGet('SELECT balance FROM users WHERE id=1')).balance,150.25);
+  assert.equal((await request('/deposit-chain/users/1/enroll','POST',{variant:'B'})).status,404);
+});
 
 // AC18: production used the pre-email schema. Regression checks exercise that
 // migration through HTTP, not a newly-created ideal schema (Gate 2).
@@ -174,9 +217,9 @@ test('AC12: balance history aggregates dates', async t => {
   assert.equal(body.data.buckets[0].deposits, '200.00');
   assert.equal(body.data.buckets[0].betProfit, '-50.00');
 });
-test('AC13: unsupported operations fail explicitly', async t => {
+test('AC13: incomplete manual credits fail before accessing the real database', async t => {
   const { request } = await fixture(t);
-  assert.equal((await request('/wallet/1/manual-deposit', 'POST', { amount: '100' })).status, 501);
+  assert.equal((await request('/wallet/1/manual-deposit', 'POST', { amount: '100' })).status, 400);
 });
 test('AC14: KYC pending filter matches stored lowercase status', async t => {
   const { request } = await fixture(t);

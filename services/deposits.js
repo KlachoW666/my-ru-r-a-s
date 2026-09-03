@@ -20,17 +20,18 @@
  */
 
 const crypto = require('crypto');
+const { transaction } = require('./sqliteTransaction');
 
 /** Сколько заявка ждёт оплаты, прежде чем протухнуть. */
 const TTL_MINUTES = Number(process.env.DEPOSIT_TTL_MINUTES || 60);
 
-function makeDepositsService({ queryAdminDb, getAdminDb, adjustBalanceById }) {
+function makeDepositsService({ queryAdminDb, getAdminDb }) {
   let schemaReady = false;
 
-  const run = (sql, params = []) => new Promise((resolve) => {
+  const run = (sql, params = []) => new Promise((resolve, reject) => {
     const db = getAdminDb();
-    if (!db) return resolve(null);
-    db.run(sql, params, function (err) { db.close(); resolve(err ? null : this); });
+    if (!db) return reject(new Error('Database unavailable'));
+    db.run(sql, params, function (err) { const result=this; db.close(()=>err?reject(err):resolve(result)); });
   });
 
   async function ensureSchema() {
@@ -60,6 +61,22 @@ function makeDepositsService({ queryAdminDb, getAdminDb, adjustBalanceById }) {
     )`);
     await run(`CREATE INDEX IF NOT EXISTS idx_deposits_user ON deposits(user_id, created_at)`);
     await run(`CREATE INDEX IF NOT EXISTS idx_deposits_status ON deposits(status, created_at)`);
+    await run('CREATE TABLE IF NOT EXISTS transactions (id INTEGER PRIMARY KEY AUTOINCREMENT, user_id INTEGER, type TEXT, amount REAL, comment TEXT, created_at TEXT DEFAULT CURRENT_TIMESTAMP)');
+    await run(`CREATE TABLE IF NOT EXISTS wallet_manual_requests (
+      request_id TEXT PRIMARY KEY, fingerprint TEXT NOT NULL, deposit_uid TEXT NOT NULL UNIQUE)`);
+    await run(`CREATE TABLE IF NOT EXISTS wallet_wagers (
+      user_id INTEGER PRIMARY KEY, required_cents INTEGER NOT NULL DEFAULT 0,
+      remaining_cents INTEGER NOT NULL DEFAULT 0)`);
+    await run(`CREATE TRIGGER IF NOT EXISTS wallet_wager_bet AFTER INSERT ON transactions
+      WHEN NEW.type IN ('case_open','upgrade','battle_entry') AND NEW.amount < 0 BEGIN
+        UPDATE wallet_wagers SET remaining_cents = MAX(0, remaining_cents - CAST(ROUND(-NEW.amount*100) AS INTEGER))
+        WHERE user_id = NEW.user_id;
+      END`);
+    await run(`CREATE TRIGGER IF NOT EXISTS wallet_wager_refund AFTER INSERT ON transactions
+      WHEN NEW.type IN ('battle_refund','case_refund','upgrade_refund') AND NEW.amount > 0 BEGIN
+        UPDATE wallet_wagers SET remaining_cents = MIN(required_cents, remaining_cents + CAST(ROUND(NEW.amount*100) AS INTEGER))
+        WHERE user_id = NEW.user_id;
+      END`);
     schemaReady = true;
   }
 
@@ -125,20 +142,42 @@ function makeDepositsService({ queryAdminDb, getAdminDb, adjustBalanceById }) {
    * Подтвердить оплату и начислить деньги.
    *
    * Идемпотентна: у уже подтверждённой заявки статус не pending, и второй
-   * вызов вернёт ok:false без начисления. Порядок операций такой же, как в
-   * остальном проекте: сначала переводим заявку, потом трогаем баланс —
-   * если начисление сорвётся, деньги не уйдут дважды.
+   * вызов вернёт ok:false без начисления. Баланс, журнал и статус заявки
+   * фиксируются одной SQLite-транзакцией; ошибка откатывает всё.
    */
-  async function confirm(uid, { by = 'admin', providerRef = null, amount = null } = {}) {
+  async function confirm(uid, { by = 'admin', providerRef = null, amount = null, manual = null } = {}) {
     await ensureSchema();
-    const row = await byUid(uid);
+    return transaction(getAdminDb, async ({get,run}) => {
+    if (manual) {
+      const previous = await get('SELECT * FROM wallet_manual_requests WHERE request_id = ?', [manual.requestId]);
+      if (previous) {
+        if (previous.fingerprint !== manual.fingerprint)
+          return {ok:false,error:'IDEMPOTENCY_CONFLICT',message:'Этот запрос уже использован с другими параметрами'};
+        const deposit = await get('SELECT * FROM deposits WHERE uid = ?', [previous.deposit_uid]);
+        if (deposit?.status === 'paid') return {ok:true,replayed:true,credited:deposit.credited,deposit:toDto(deposit)};
+        return {ok:false,error:'ALREADY_SETTLED',message:'Запрос уже обработан'};
+      }
+      const owner = await get('SELECT id,username FROM users WHERE id = ?', [manual.userId]);
+      if (!owner) return {ok:false,error:'USER_NOT_FOUND',message:'Пользователь не найден'};
+      await run(`INSERT INTO deposits(uid,user_id,username,method,amount,status,provider,comment)
+        VALUES (?,?,?,'manual',?,'pending','admin',?)`, [uid,owner.id,owner.username,manual.amount,manual.reason]);
+      await run('INSERT INTO wallet_manual_requests(request_id,fingerprint,deposit_uid) VALUES(?,?,?)',
+        [manual.requestId,manual.fingerprint,uid]);
+    }
+    const row = await get('SELECT * FROM deposits WHERE uid = ?', [uid]);
     if (!row) return { ok: false, error: 'NOT_FOUND', message: 'Заявка не найдена' };
     if (row.status !== 'pending') {
       return { ok: false, error: 'ALREADY_SETTLED', message: `Заявка уже в статусе «${row.status}»`, deposit: toDto(row) };
     }
 
-    const credited = Number(amount != null ? amount : row.amount) || 0;
-    if (credited <= 0) return { ok: false, error: 'BAD_AMOUNT', message: 'Некорректная сумма' };
+    const credited = Number(amount != null ? amount : row.amount);
+    const cents = Math.round(credited * 100);
+    if (!Number.isSafeInteger(cents) || credited <= 0 || Math.abs(credited*100-cents)>1e-6)
+      return { ok: false, error: 'BAD_AMOUNT', message: 'Некорректная сумма' };
+    const user = await get('SELECT id,balance FROM users WHERE id = ?', [row.user_id]);
+    if (!user) return { ok:false,error:'USER_NOT_FOUND',message:'Пользователь не найден' };
+    if (!Number.isSafeInteger(Math.round(Number(user.balance)*100)+cents))
+      return {ok:false,error:'BAD_AMOUNT',message:'Превышен допустимый баланс'};
 
     const upd = await run(
       `UPDATE deposits SET status = 'paid', credited = ?, settled_at = CURRENT_TIMESTAMP,
@@ -150,10 +189,45 @@ function makeDepositsService({ queryAdminDb, getAdminDb, adjustBalanceById }) {
       return { ok: false, error: 'ALREADY_SETTLED', message: 'Заявка уже обработана' };
     }
 
-    await adjustBalanceById(row.user_id, credited, 'deposit',
-      `Пополнение ${row.method}${row.asset ? ' ' + row.asset : ''} №${row.uid}`);
+    await run('CREATE TABLE IF NOT EXISTS transactions (id INTEGER PRIMARY KEY AUTOINCREMENT, user_id INTEGER, type TEXT, amount REAL, comment TEXT, created_at TEXT DEFAULT CURRENT_TIMESTAMP)');
+    await run('UPDATE users SET balance = ROUND(COALESCE(balance,0) + ?,2) WHERE id = ?', [credited,row.user_id]);
+    await run("INSERT INTO transactions(user_id,type,amount,comment) VALUES (?,'deposit',?,?)", [row.user_id,credited,
+      `Пополнение ${row.method}${row.asset ? ' ' + row.asset : ''} №${row.uid}${row.comment ? ': '+row.comment : ''}`]);
+    if (manual?.wagerCents) {
+      const current = await get('SELECT remaining_cents FROM wallet_wagers WHERE user_id = ?', [row.user_id]);
+      const required = Number(current?.remaining_cents || 0) + manual.wagerCents;
+      if (!Number.isSafeInteger(required)) throw new Error('Wager amount overflow');
+      await run(`INSERT INTO wallet_wagers(user_id,required_cents,remaining_cents) VALUES(?,?,?)
+        ON CONFLICT(user_id) DO UPDATE SET required_cents=excluded.required_cents,remaining_cents=excluded.remaining_cents`,
+        [row.user_id,required,required]);
+    }
 
-    return { ok: true, credited, deposit: toDto(await byUid(uid)) };
+    return { ok: true, credited, deposit: toDto(await get('SELECT * FROM deposits WHERE uid = ?', [uid])) };
+    });
+  }
+
+  async function manualCredit({userId,amount,reason,wagerMultiplier='0',requestId,by='admin'}) {
+    const value = Number(amount), multiplier = Number(wagerMultiplier);
+    const wagerCents = Math.round(value * 100 * multiplier);
+    if (!/^\d+(\.\d{1,2})?$/.test(String(amount)) || !Number.isFinite(value) || value<=0 || value>10000000)
+      return {ok:false,error:'BAD_AMOUNT',message:'Сумма должна быть от 0.01 до 10000000 ₽'};
+    if (!/^\d+(\.\d{1,8})?$/.test(String(wagerMultiplier)) || !Number.isFinite(multiplier) || multiplier<0 || !Number.isSafeInteger(wagerCents))
+      return {ok:false,error:'BAD_WAGER',message:'Некорректный множитель отыгрыша'};
+    if (typeof reason!=='string' || !reason.trim() || reason.length>500)
+      return {ok:false,error:'BAD_REASON',message:'Укажите причину длиной до 500 символов'};
+    if (typeof requestId!=='string' || !/^[a-zA-Z0-9_-]{16,100}$/.test(requestId))
+      return {ok:false,error:'BAD_REQUEST_ID',message:'Обновите страницу: отсутствует идентификатор операции'};
+    const fingerprint=crypto.createHash('sha256').update(JSON.stringify([String(userId),value,reason.trim(),multiplier,String(by)])).digest('hex');
+    return confirm('manual-'+crypto.createHash('sha256').update(requestId).digest('hex'),{by,
+      manual:{userId,amount:value,reason:reason.trim(),requestId,fingerprint,wagerCents}});
+  }
+
+  async function wager(userId) {
+    await ensureSchema();
+    const rows = await queryAdminDb('SELECT remaining_cents FROM wallet_wagers WHERE user_id = ?', [userId]);
+    if (rows.failed) throw new Error('Cannot read wager');
+    const cents = Number(rows[0]?.remaining_cents || 0);
+    return {remaining:(cents/100).toFixed(2),hasActiveWager:cents>0};
   }
 
   async function reject(uid, { by = 'admin', comment = '' } = {}) {
@@ -202,7 +276,7 @@ function makeDepositsService({ queryAdminDb, getAdminDb, adjustBalanceById }) {
     return toDto(await byUid(uid));
   }
 
-  return { ensureSchema, create, byUid, forUser, listForUser, confirm, reject,
+  return { ensureSchema, create, byUid, forUser, listForUser, confirm, reject, manualCredit, wager,
            attachProvider, markFailed, expireStale, toDto, TTL_MINUTES };
 }
 

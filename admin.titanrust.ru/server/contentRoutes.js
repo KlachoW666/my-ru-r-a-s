@@ -81,8 +81,9 @@ function register({app,DB_PATH,requireAdminJWT}) {
     if(q.ids!==undefined){const ids=Array.isArray(q.ids)?q.ids:String(q.ids).split(',');if(!ids.length)where.push('0');else{where.push(`id IN (${ids.map(()=>'?')})`);args.push(...ids);}}
     if(q.upgraderEnabled!==undefined){where.push('COALESCE(upgraderEnabled,0)=?');args.push(boolean(q.upgraderEnabled,'upgraderEnabled'));}
     if(q.type_color){where.push("REPLACE(COALESCE(rarity_color,color,''),'#','')=?");args.push(q.type_color);}
-    for(const [key,op]of [['priceMin','>='],['priceMax','<=']])if(q[key]!==undefined){where.push(`price ${op} ?`);args.push(number(q[key],key));}
-    return list(db,'items',q,where,args,'price DESC,id DESC',itemDto);
+    for(const [key,op]of [['priceMin','>='],['priceMax','<='],['priceGt','>'],['priceLt','<']])if(q[key]!==undefined){where.push(`price ${op} ?`);args.push(number(q[key],key));}
+    const direction=q.sortDir==='asc'?'ASC':'DESC';
+    return list(db,'items',q,where,args,`price ${direction},id ${direction}`,itemDto);
   });
   function itemFields(body,old={}) {
     const b={...old,...body};
