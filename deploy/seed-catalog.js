@@ -2,26 +2,22 @@
 'use strict';
 
 /**
- * Наполнение каталога предметов.
+ * Наполнение каталога предметов из rust.tm.
  *
  *   node deploy/seed-catalog.js                 посмотреть, что будет, не писать
  *   node deploy/seed-catalog.js --apply         записать
  *   node deploy/seed-catalog.js --limit 200     только первые 200 (проверка)
- *   node deploy/seed-catalog.js --probe         показать сырой ответ API
  *
- * Список берётся из полной выгрузки lis-skins, картинки и редкость — из Steam
- * GetAssetClassInfo по item_class_id, пачками по 100. Около 46 запросов и пары
- * минут на весь Rust вместо получаса постраничного обхода Market.
+ * Список, цены и редкость берутся у rust.tm одним запросом. У Steam
+ * спрашиваются ТОЛЬКО картинки, по classid, пачками по 100 — около полусотни
+ * запросов на весь каталог вместо получаса постраничного обхода Market.
  *
- * Если выгрузка отвечает 403 — защита площадки режет её по адресу сервера, —
- * список идёт через официальный API по ключу LISSKINS_API_KEY. Форма его
- * ответа документацией не подтверждена, поэтому есть режим --probe: он
- * печатает сырой ответ, чтобы подогнать разбор по факту.
+ * STEAM_API_KEY необязателен. Без него каталог соберётся с правильными ценами
+ * и редкостью, но предметы останутся без изображений; картинки доберёт
+ * следующий запуск с ключом или обход Market.
  *
  * Каталог меняет экономику: от цен зависят выплаты и RTP кейсов, поэтому по
  * умолчанию скрипт ничего не пишет.
- *
- * Требуется STEAM_API_KEY в .env — без него не будет ни картинок, ни редкости.
  */
 
 const path = require('path');
@@ -30,8 +26,6 @@ try { process.loadEnvFile(path.join(ROOT, '.env')); } catch {}
 
 const args = process.argv.slice(2);
 const APPLY = args.includes('--apply');
-
-const PROBE = args.includes('--probe');
 
 const li = args.indexOf('--limit');
 const LIMIT = li !== -1 && args[li + 1] ? Number(args[li + 1]) : 0;
@@ -45,53 +39,30 @@ if (args.includes('-h') || args.includes('--help')) {
 
 const catalog = require(path.join(ROOT, 'services', 'steamCatalog'));
 const seeder = require(path.join(ROOT, 'services', 'catalogSeed'));
-const lisApi = require(path.join(ROOT, 'services', 'lisSkinsApi'));
+const rustTm = require(path.join(ROOT, 'services', 'rustTm'));
 
 const num = (n) => Number(n || 0).toLocaleString('ru-RU');
 
-/*
- * Показать сырой ответ API. Форма ответа /market/search документацией не
- * подтверждена, и разбор в lisSkinsApi намеренно терпимый; этот режим нужен,
- * чтобы подогнать его по факту.
- */
-async function runProbe() {
-  console.log('');
-  console.log(`  Хост:  ${lisApi.BASE}`);
-  const r = await lisApi.probe();
-  if (!r.ok) {
-    console.error(`  Не получилось: ${r.message || ('HTTP ' + r.status)}`);
-    console.error('');
-    console.error('  Ключ берётся в личном кабинете lis-skins и кладётся в .env:');
-    console.error('    LISSKINS_API_KEY=...');
-    console.error('');
-    process.exit(1);
-  }
-  console.log(`  Схема авторизации: ${r.scheme}`);
-  console.log('');
-  console.log(JSON.stringify(r.body, null, 2).slice(0, 4000));
-  console.log('');
-  process.exit(0);
-}
-
 (async () => {
-  if (PROBE) return runProbe();
-
   const db = catalog.openDb();
   if (!db) { console.error('Не открылась база'); process.exit(1); }
   // Обход Steam работает параллельно и держит базу — ждём, а не падаем.
   db.configure('busyTimeout', 15000);
 
+  const steamKey = process.env.STEAM_API_KEY;
+
   console.log('');
-  console.log('  Список:     lis-skins (выгрузка, при отказе — API по ключу)');
-  console.log('  Картинки и редкость: Steam GetAssetClassInfo');
-  console.log(`  Режим:      ${APPLY ? 'ЗАПИСЬ' : 'только просмотр'}`);
-  if (LIMIT) console.log(`  Ограничение: ${num(LIMIT)} предметов`);
-  console.log('  Качаю выгрузку (16 МБ), это небыстро…');
+  console.log('  Список, цены, редкость: rust.tm');
+  console.log(`  Картинки:               ${steamKey ? 'Steam GetAssetClassInfo' : 'НЕТ — не задан STEAM_API_KEY'}`);
+  console.log(`  Опорная цена:           ${rustTm.PRICE_FIELD === 'price' ? 'price' : 'avg_price'}`);
+  console.log(`  Режим:                  ${APPLY ? 'ЗАПИСЬ' : 'только просмотр'}`);
+  if (LIMIT) console.log(`  Ограничение:            ${num(LIMIT)} предметов`);
+  console.log('');
 
   let lastPct = -1;
   const r = await seeder.seed({
     db,
-    apiKey: process.env.STEAM_API_KEY,
+    apiKey: steamKey,
     dryRun: !APPLY,
     limit: LIMIT,
     onProgress: ({ done, total, written }) => {
@@ -111,11 +82,11 @@ async function runProbe() {
   }
 
   console.log('');
-  console.log(`  Лотов в выгрузке:    ${num(r.lots)}`);
-  console.log(`  Уникальных вещей:    ${num(r.unique)}`);
+  console.log(`  Предметов у rust.tm: ${num(r.unique)}`);
   console.log(`  Обработано:          ${num(r.written)}   (новых ${num(r.created)}, обновлено ${num(r.updated)})`);
-  if (r.noInfo)        console.log(`  Steam не опознал:    ${num(r.noInfo)}`);
-  if (r.failedBatches) console.log(`  Неудачных пачек:     ${num(r.failedBatches)}  — повторите запуск, они дозаберутся`);
+  if (r.noImage)       console.log(`  Без картинки:        ${num(r.noImage)}${r.hadSteamKey ? '  — Steam не опознал classid' : '  — нет ключа Steam'}`);
+  if (r.failedBatches) console.log(`  Неудачных пачек:     ${num(r.failedBatches)}  — повторите запуск, картинки дозаберутся`);
+  if (r.capped)        console.log(`  Срезано по потолку:  ${num(r.capped)}  — одиночные лоты с задранной ценой`);
   console.log(`  Записей в каталоге:  ${num(r.countBefore)} -> ${num(r.countAfter)}`);
   if (r.updatedAt) console.log(`  Данные на:           ${r.updatedAt}`);
 

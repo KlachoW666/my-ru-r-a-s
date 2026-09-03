@@ -47,7 +47,7 @@ const { verifyMailer } = require('./services/mailer');
 const { makeBattlesService } = require('./services/battles');
 const { makeDepositsService } = require('./services/deposits');
 const { makeWalletConfig } = require('./services/walletConfig');
-const lisSkins = require('./services/lisSkins');
+const rustTm = require('./services/rustTm');
 const { makeRatesService } = require('./services/rates');
 
 // Как часто тянуть цены. 0 — не обновлять автоматически, только вручную
@@ -498,25 +498,9 @@ async function getLiveCases() {
 // Get live banners from Admin DB or fallback
 async function getLiveBanners() {
   const dbBanners = await queryAdminDb(`SELECT * FROM banners WHERE active = 1 ORDER BY position ASC`);
-  if (dbBanners && dbBanners.length > 0) {
-    return dbBanners.map(b => ({
-      id: `banner-${b.id}`,
-      title: b.title || "Делай нарезки\nлутай ещё больше",
-      description: "Конкурс моментов в тиктоке",
-      buttonText: "Участвовать",
-      buttonColor: "#f36a21",
-      buttonAction: "url",
-      buttonValue: b.url || "/giveaway",
-      glowColor: "#f36a21",
-      borderColor: "#754325",
-      background: "radial-gradient(ellipse at 80% 50%, #2a1409 0%, #0b0a08 100%)",
-      image: b.image || "/assets/battles/winner-boar.png",
-      // Видео убрано намеренно: mega-loop.mp4 — ролик с кабаном прежнего
-      // бренда, перерисовать его нечем. Без него баннер показывает картинку,
-      // которая уже заменена на устройство SATCHEL. Вернуть, когда появится
-      // свой ролик (см. docs/SATCHEL-REBRAND.md).
-      video: null
-    }));
+  if (dbBanners && !dbBanners.failed) {
+    // Пустая выборка — все баннеры отключены, а не повод показывать демо.
+    return dbBanners.map(require('./services/bannerContent').publicBanner);
   }
 
   return [
@@ -2989,16 +2973,17 @@ server.listen(PORT, async () => {
       try {
         const db = openCatalogDb();
         if (!db) return;
-        await refreshFxRate();
-        const r = await lisSkins.refreshPrices({
+        // Курс больше не нужен: rust.tm отдаёт цены сразу в рублях.
+        const r = await rustTm.refreshPrices({
           db,
           run: (d, sql, prm) => new Promise((res) => d.run(sql, prm, function (e) { res(e ? null : this); })),
-          all: (d, sql, prm) => new Promise((res) => d.all(sql, prm, (e, rows) => res(e ? [] : rows || []))),
-          usdToRub: (usd) => usdCentsToRub(Math.round(Number(usd) * 100))
+          all: (d, sql, prm) => new Promise((res) => d.all(sql, prm, (e, rows) => res(e ? [] : rows || [])))
         });
         db.close();
         if (r.ok) {
-          console.log(`[Цены] Обновлено ${r.updated} из ${r.fromApi}, сдвиг ${r.shiftPercent}%`);
+          const capped = r.capped ? `, срезано по потолку ${r.capped}` : '';
+          console.log(`[Цены] rust.tm: обновлено ${r.updated} из ${r.fromApi}, `
+                    + `сдвиг ${r.shiftPercent}%${capped}`);
         } else {
           console.warn(`[Цены] Не обновились: ${r.message}`);
         }
@@ -3057,8 +3042,8 @@ server.listen(PORT, async () => {
   console.log(` Каталог Steam: ${catalogEnabled
     ? `обход включён (${CATALOG_PAGE_SIZE} поз./запрос, интервал ${CATALOG_INTERVAL_MS} мс)`
     : 'выключен (STEAM_CATALOG_SYNC=0)'}`);
-  console.log(` Цены lis-skins: ${PRICE_REFRESH_MS > 0
-    ? `каждые ${Math.round(PRICE_REFRESH_MS / 60000)} мин, поле «${lisSkins.PRICE_FIELD}»`
+  console.log(` Цены rust.tm: ${PRICE_REFRESH_MS > 0
+    ? `каждые ${Math.round(PRICE_REFRESH_MS / 60000)} мин, опора «${rustTm.PRICE_FIELD}»`
     : 'только вручную (PRICE_REFRESH_MS=0)'}`);
   if (ALLOW_MOCK_AUTH) {
     console.log(` [!] ALLOW_MOCK_AUTH включён — без токена отдаётся моковый профиль.`);

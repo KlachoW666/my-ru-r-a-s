@@ -2,22 +2,27 @@
 'use strict';
 
 /**
- * Обновление цен каталога из lis-skins.com.
+ * Обновление цен каталога из rust.tm.
  *
  * Смена цен меняет экономику: от стоимости предмета зависят выплаты, RTP
  * кейсов и цена входа в баттлы. Поэтому по умолчанию скрипт ничего не пишет —
  * только показывает, что изменится.
  *
- *   node deploy/prices.js                          сравнить, ничего не менять
- *   node deploy/prices.js --apply                  записать новые цены
- *   node deploy/prices.js --field unlocked_price   другое поле цены
+ *   node deploy/prices.js                     сравнить, ничего не менять
+ *   node deploy/prices.js --apply             записать новые цены
+ *   node deploy/prices.js --field price       опираться на лучшее предложение
  *
  * Сервер делает то же самое сам, раз в полчаса (PRICE_REFRESH_MS). Скрипт
  * нужен, чтобы посмотреть расхождение до того, как оно применится, и чтобы
  * обновить цены разово, не дожидаясь таймера.
  *
- * Редкость, цвет и картинки не трогаются никогда: в выгрузке lis-skins их нет,
- * их источник — обход Steam Market.
+ * Опорная цена по умолчанию — avg_price, средняя цена сделок, а не лучшее
+ * текущее предложение. Причина расписана в services/rustTm.js: одиночный лот с
+ * задранной ценой делает `price` неадекватным, и в замере таких предметов
+ * нашлось 46 из 4862, вплоть до 200 000 ₽ при средней 75 ₽.
+ *
+ * Редкость, цвет и картинки не трогаются: их пишет наполнение каталога
+ * (deploy/seed-catalog.js).
  */
 
 const path = require('path');
@@ -28,15 +33,17 @@ const args = process.argv.slice(2);
 const APPLY = args.includes('--apply');
 
 const fieldIdx = args.indexOf('--field');
-if (fieldIdx !== -1 && args[fieldIdx + 1]) process.env.LISSKINS_PRICE_FIELD = args[fieldIdx + 1];
+if (fieldIdx !== -1 && args[fieldIdx + 1]) process.env.RUSTTM_PRICE_FIELD = args[fieldIdx + 1];
 
 if (args.includes('-h') || args.includes('--help')) {
-  console.log(require('fs').readFileSync(__filename, 'utf8').split('*/')[0].replace(/^\/\*\*?|^ \* ?/gm, '').trim());
+  console.log(require('fs').readFileSync(__filename, 'utf8')
+    .split('*/')[0].replace(/^#![^\n]*\n/, '').replace(/^'use strict';\n/m, '')
+    .replace(/^\/\*\*?|^ \* ?/gm, '').trim());
   process.exit(0);
 }
 
 const catalog = require(path.join(ROOT, 'services', 'steamCatalog'));
-const api = require(path.join(ROOT, 'services', 'lisSkins'));
+const api = require(path.join(ROOT, 'services', 'rustTm'));
 
 const run = (db, sql, p = []) => new Promise((res) => db.run(sql, p, function (e) { res(e ? null : this); }));
 const all = (db, sql, p = []) => new Promise((res) => db.all(sql, p, (e, r) => res(e ? [] : r || [])));
@@ -46,22 +53,19 @@ const money = (n) => Math.round(n).toLocaleString('ru-RU') + ' ₽';
 (async () => {
   const db = catalog.openDb();
   if (!db) { console.error('Не открылась база'); process.exit(1); }
+  // Обход Steam работает параллельно и держит базу — ждём, а не падаем.
+  db.configure('busyTimeout', 15000);
 
   await catalog.ensureCatalogSchema(db);
-  // Курс нужен до пересчёта: цены в выгрузке долларовые.
-  await catalog.refreshFxRate();
 
   console.log('');
-  console.log('  Источник:   lis-skins.com');
-  console.log(`  Поле цены:  ${api.PRICE_FIELD}`);
+  console.log('  Источник:   rust.tm');
+  console.log(`  Опора:      ${api.PRICE_FIELD === 'price' ? 'price (лучшее предложение)' : 'avg_price (средняя сделок)'}`);
+  console.log(`  Потолок:    ${money(api.MAX_PRICE_RUB)}`);
   console.log(`  Режим:      ${APPLY ? 'ЗАПИСЬ' : 'только сравнение'}`);
   console.log('  Загружаю каталог одним запросом…');
 
-  const r = await api.refreshPrices({
-    db, run, all,
-    usdToRub: (usd) => catalog.usdCentsToRub(Math.round(Number(usd) * 100)),
-    dryRun: !APPLY
-  });
+  const r = await api.refreshPrices({ db, run, all, dryRun: !APPLY });
 
   if (!r.ok) {
     console.error(`\n  Не получилось: ${r.message}\n`);
@@ -73,8 +77,9 @@ const money = (n) => Math.round(n).toLocaleString('ru-RU') + ' ₽';
   console.log(`  Пришло из выгрузки:  ${r.fromApi}`);
   console.log(`  Есть в каталоге:     ${r.inCatalog}`);
   console.log(`  Совпало и обновится: ${r.updated}`);
-  console.log(`  Нет у нас:           ${r.unknown}  (заводит их обход Steam — здесь нет редкости)`);
-  console.log(`  Без цены:            ${r.skipped}`);
+  console.log(`  Нет у нас:           ${r.unknown}  (их заводит deploy/seed-catalog.js)`);
+  if (r.skipped) console.log(`  Без цены:            ${r.skipped}`);
+  if (r.capped)  console.log(`  Срезано по потолку:  ${r.capped}  — одиночные лоты с задранной ценой`);
   console.log('');
   console.log(`  Сумма каталога была: ${money(r.sumOld)}`);
   console.log(`  Станет:              ${money(r.sumNew)}`);
