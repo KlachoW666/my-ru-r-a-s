@@ -3035,6 +3035,89 @@ server.listen(PORT, async () => {
   setTimeout(refreshRates, 5000).unref?.();
   setInterval(refreshRates, rates.RATES_TTL_MS).unref?.();
 
+  /*
+   * Здоровье базы до всего остального.
+   *
+   * Повреждение индекса проявляется коварно: COUNT(*) по таблице работает, а
+   * выборка с ORDER BY по индексу падает с SQLITE_CORRUPT. Сайт при этом
+   * выглядит живым, просто каталог «пуст». Именно так и случилось на рабочем
+   * сервере: 5445 предметов на месте, а лента пустая.
+   *
+   * REINDEX перестраивает индексы из таблицы, данные не трогает.
+   */
+  try {
+    const hdb = openCatalogDb();
+    if (hdb) {
+      hdb.configure('busyTimeout', 15000);
+      const q = (sql) => new Promise((res) => hdb.get(sql, (e, r) => res({ e, r })));
+      const exec = (sql) => new Promise((res) => hdb.run(sql, (e) => res(e)));
+
+      const first = await q('PRAGMA quick_check');
+      const verdict = first.r ? Object.values(first.r)[0] : (first.e && first.e.message);
+
+      if (verdict !== 'ok') {
+        console.warn('');
+        console.warn(` [!] База повреждена: ${verdict}`);
+        console.warn(' [~] Перестраиваю индексы (REINDEX)…');
+
+        const err = await exec('REINDEX');
+        const again = await q('PRAGMA quick_check');
+        const after = again.r ? Object.values(again.r)[0] : (again.e && again.e.message);
+
+        if (!err && after === 'ok') {
+          console.log(' [~] Индексы перестроены, база в порядке. Данные не тронуты.');
+        } else {
+          /*
+           * REINDEX не сработал — и это обычный исход, а не редкость.
+           * Проверено на воспроизведённом повреждении: обнаружив битую
+           * страницу, SQLite отказывается выполнять и REINDEX, и DROP INDEX,
+           * и VACUUM. Починить базу «на месте» нельзя.
+           *
+           * Работает пересборка: прочитать всё, что читается, и записать в
+           * новый файл. Этим занимается deploy/repair-db.js — он делает копию
+           * до всяких изменений, собирает новый файл рядом, сверяет число
+           * строк по каждой таблице и только потом подменяет рабочий.
+           *
+           * Автоматически здесь не запускаем: подмена базы под работающим
+           * сайтом — не то действие, которое стоит делать без ведома
+           * человека, даже с копией.
+           */
+          console.error(' [!] Починить на месте не вышло — так с SQLite и бывает.');
+          const firstLine = String(after).split(String.fromCharCode(10))[0];
+          console.error(`     Проверка после REINDEX: ${firstLine}`);
+          console.error('     Данные, скорее всего, целы: повреждён индекс, а не таблица.');
+          console.error('     Восстановить (сделает копию и сверит все строки):');
+          console.error('       pm2 stop main-site admin-panel');
+          console.error('       node deploy/repair-db.js            # посмотреть');
+          console.error('       node deploy/repair-db.js --apply    # восстановить');
+          console.error('       pm2 start main-site admin-panel');
+        }
+        console.warn('');
+      }
+      hdb.close();
+    }
+  } catch (e) {
+    console.warn(` [!] Проверка базы не удалась: ${e.message}`);
+  }
+
+  /*
+   * Расхождение схемы: на части установок в series нет колонок isSecret и
+   * isLimited. Запрос секретных серий падал с "no such column" и молча отдавал
+   * пустоту, из-за чего секретные серии просто не показывались.
+   *
+   * ALTER идемпотентен: повторный запуск получит "duplicate column" и молча
+   * его проглотит, как ensureCatalogSchema.
+   */
+  try {
+    const sdb = getAdminDb();
+    if (sdb) {
+      for (const col of ['isSecret INTEGER DEFAULT 0', 'isLimited INTEGER DEFAULT 0']) {
+        await new Promise((res) => sdb.run(`ALTER TABLE series ADD COLUMN ${col}`, () => res()));
+      }
+      sdb.close();
+    }
+  } catch {}
+
   // Состояние каталога прямо в лог. Пустая таблица предметов проявляется
   // на сайте странно: лента показывает один и тот же предмет из запасного
   // списка, зашитого в код, и выглядит это как поломка вёрстки, а не как
