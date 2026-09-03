@@ -321,7 +321,7 @@ async function _getLiveItemsUncached() {
     }));
   }
   
-  // Fallback to local skins.json
+  // Локальный слепок каталога, если он есть.
   if (fs.existsSync(SKINS_FILE)) {
     try {
       const data = JSON.parse(fs.readFileSync(SKINS_FILE, 'utf8'));
@@ -329,11 +329,34 @@ async function _getLiveItemsUncached() {
     } catch (e) {}
   }
 
-  return [
-    { id: "1", name: "AK-47 | Tempered", price: 4500, priceText: "4500 ₽", image: "/assets/battles/winner-boar.png", rarity: "mythic" },
-    { id: "2", name: "LR-300 | Victoria", price: 1200, priceText: "1200 ₽", image: "/assets/battles/boar-ready.png", rarity: "legendary" },
-    { id: "3", name: "MP5 | Cold Hunter", price: 350, priceText: "350 ₽", image: "/assets/header/logo.webp", rarity: "rare" }
-  ];
+  /*
+   * Дальше зашитого списка НЕТ, и это осознанно.
+   *
+   * Раньше здесь возвращались три предмета прямо из кода, с картинками
+   * /assets/header/logo.webp и battles/*.png. Задумка была «пусть лента не
+   * пустует», но получалось хуже пустоты: в ленте по кругу «выпадал» логотип
+   * сайта с ценой 350, и со стороны это выглядело поломкой вёрстки, а не
+   * отсутствием данных. Настоящую причину по такой картинке не найти.
+   *
+   * Пустая лента однозначна: данных нет, и в логе написано почему.
+   */
+  warnEmptyCatalog();
+  return [];
+}
+
+/*
+ * Сообщение о пустом каталоге, но не чаще раза в пять минут: getLiveItems
+ * зовётся почти из каждого игрового эндпоинта, и без ограничения лог
+ * превратился бы в сплошную стену.
+ */
+let emptyCatalogWarnedAt = 0;
+function warnEmptyCatalog() {
+  const now = Date.now();
+  if (now - emptyCatalogWarnedAt < 5 * 60 * 1000) return;
+  emptyCatalogWarnedAt = now;
+  console.error('[Каталог] ПУСТО: предметов нет ни в базе, ни в локальном слепке.');
+  console.error('[Каталог] Лента и кейсы останутся пустыми, пока каталог не наполнится.');
+  console.error('[Каталог] Наполнить: node deploy/seed-catalog.js --apply');
 }
 
 // Get live series / categories from Admin DB with non-empty cases filtering
@@ -647,7 +670,8 @@ const LIVE_FEED_MAX = 200;
 const realDrops = [];              // самые свежие в начале
 
 const FEED_NAMES = [
-  'Кабан', 'RustLord', 'Шрам', 'Тихий', 'Барсук', 'Никита', 'Волк', 'Прапор',
+  // Первым здесь стояло имя прежнего бренда — осталось от Kaban.
+  'Фитиль', 'RustLord', 'Шрам', 'Тихий', 'Барсук', 'Никита', 'Волк', 'Прапор',
   'Сталкер', 'Мясник', 'Хантер', 'Гоша', 'Рейдер', 'Пепел', 'Тайга'
 ];
 
@@ -1081,13 +1105,17 @@ async function getFallbackItems() {
       chance: 0
     }));
   }
-  return [
-    { id: 1, name: "AK-47 | Tempered", price: 4500, image: "/assets/battles/winner-boar.png", rarity: "GOLD", color: "#eb4b4b", chance: 0 },
-    { id: 2, name: "LR-300 | Victoria", price: 1200, image: "/assets/battles/boar-ready.png", rarity: "VIOLET", color: "#a33ee2", chance: 0 },
-    { id: 3, name: "MP5 | Cold Hunter", price: 350, image: "/assets/header/logo.webp", rarity: "RARE", color: "#65dc04", chance: 0 },
-    { id: 4, name: "Metal Facemask", price: 850, image: "/assets/battles/winner-boar.png", rarity: "VIOLET", color: "#a33ee2", chance: 0 },
-    { id: 5, name: "Whiteout Semi-Automatic Pistol", price: 2400, image: "/assets/header/logo.webp", rarity: "UNUSUAL", color: "#4076ff", chance: 0 }
-  ];
+  /*
+   * Здесь тоже нет зашитого списка, и по той же причине.
+   *
+   * Подставлять выдуманные предметы в кейс опаснее, чем в ленту: игрок
+   * получил бы в приз логотип сайта, и это списалось бы ему как выигрыш.
+   *
+   * Пустой список безопасен: открытие кейса проверяет состав до того, как
+   * тронуть деньги, и при нуле предметов возвращает 409 CASE_MISCONFIGURED
+   * с текстом «В кейсе нет доступных предметов. Проверьте состав в админке».
+   */
+  return [];
 }
 
 app.post(['/api/v1/cases/open', '/api/v1/cases/:slug/open'], async (req, res) => {
@@ -3028,12 +3056,49 @@ server.listen(PORT, async () => {
         console.warn('     Все предметы помечены снятыми с продажи. Снять пометку:');
         console.warn('     UPDATE items SET delisted = 0 WHERE price_usd_cents IS NOT NULL;');
       } else {
-        console.warn('     Предметов нет вовсе. Каталог набирается обходом Steam Market:');
-        console.warn(`     обход сейчас ${catalogEnabled ? 'включён, круг занимает около получаса' : 'ВЫКЛЮЧЕН (STEAM_CATALOG_SYNC=0)'}`);
+        console.warn('     Предметов нет вовсе.');
       }
-      console.warn('     Пока каталог пуст, сайт показывает запасной список из кода:');
-      console.warn('     лента из одного предмета, кейсы без содержимого.');
+      console.warn('     Пока каталог пуст, лента и кейсы будут пустыми:');
+      console.warn('     выдуманных предметов сервер больше не подставляет.');
       console.warn('');
+
+      /*
+       * Наполняем сами.
+       *
+       * Раньше пустой каталог оставался пустым до тех пор, пока кто-нибудь не
+       * заметит и не запустит наполнение руками, а сайт всё это время
+       * показывал подставные предметы и выглядел рабочим. Теперь подставных
+       * нет, и оставлять сайт пустым в ожидании ручного действия незачем:
+       * rust.tm отдаёт каталог одним открытым запросом, без ключа.
+       *
+       * Условия намеренно узкие. Наполнение запускается ТОЛЬКО когда доступных
+       * предметов ноль: непустой каталог не трогается никогда, чтобы автозапуск
+       * не переписал цены под живым сайтом. Отключается CATALOG_AUTOSEED=0.
+       */
+      if (String(process.env.CATALOG_AUTOSEED || '1') !== '0') {
+        console.warn(' [~] Наполняю каталог из rust.tm…');
+        try {
+          const seeder = require('./services/catalogSeed');
+          const sdb = openCatalogDb();
+          if (!sdb) throw new Error('база каталога недоступна');
+          sdb.configure('busyTimeout', 15000);
+          const r = await seeder.seed({ db: sdb, apiKey: process.env.STEAM_API_KEY });
+          sdb.close();
+          if (r.ok) {
+            console.log(` [~] Каталог наполнен: ${r.created} новых, ${r.updated} обновлено`
+                      + (r.noImage ? `, без картинок ${r.noImage}` : ''));
+          } else {
+            console.warn(` [!] Наполнить не вышло: ${r.message}`);
+            console.warn('     Запустить вручную: node deploy/seed-catalog.js --apply');
+          }
+        } catch (e) {
+          console.warn(` [!] Наполнить не вышло: ${e.message}`);
+          console.warn('     Запустить вручную: node deploy/seed-catalog.js --apply');
+        }
+      } else {
+        console.warn('     Автонаполнение отключено (CATALOG_AUTOSEED=0).');
+        console.warn('     Наполнить вручную: node deploy/seed-catalog.js --apply');
+      }
     }
   } catch (e) {
     console.warn(` [!] Не удалось прочитать каталог: ${e.message}`);
