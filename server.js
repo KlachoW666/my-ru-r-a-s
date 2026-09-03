@@ -3149,6 +3149,10 @@ server.listen(PORT, async () => {
    *
    * REINDEX перестраивает индексы из таблицы, данные не трогает.
    */
+  // Итог проверки целостности: по нему ниже решается, можно ли вообще
+  // что-то писать в базу.
+  let dbHealthy = true;
+
   try {
     const hdb = openCatalogDb();
     if (hdb) {
@@ -3171,6 +3175,7 @@ server.listen(PORT, async () => {
         if (!err && after === 'ok') {
           console.log(' [~] Индексы перестроены, база в порядке. Данные не тронуты.');
         } else {
+          dbHealthy = false;
           /*
            * REINDEX не сработал — и это обычный исход, а не редкость.
            * Проверено на воспроизведённом повреждении: обнаружив битую
@@ -3229,6 +3234,26 @@ server.listen(PORT, async () => {
   try {
     const rows = await queryAdminDb(
       `SELECT COUNT(*) AS total, SUM(CASE WHEN delisted = 1 THEN 1 ELSE 0 END) AS hidden FROM items`);
+
+    /*
+     * Сбой чтения — это НЕ пустой каталог.
+     *
+     * queryAdminDb при ошибке возвращает пустой массив, и rows[0]?.total даёт
+     * undefined, а значит ноль. Раньше сервер принимал это за пустую таблицу
+     * и запускал наполнение прямо в повреждённую базу: качал выгрузку, ходил
+     * в Steam и пытался записать 4900 строк, каждая из которых падала. При
+     * каждом перезапуске заново.
+     */
+    if (rows.failed) {
+      console.error('');
+      console.error(' [!] Каталог прочитать не удалось — база не ответила.');
+      console.error('     Это НЕ пустой каталог: наполнение не запускается,');
+      console.error('     чтобы не писать в неисправную базу.');
+      console.error('     Проверить и восстановить: node deploy/repair-db.js');
+      console.error('');
+      return;
+    }
+
     const total = Number(rows[0]?.total) || 0;
     const hidden = Number(rows[0]?.hidden) || 0;
     const usable = total - hidden;
@@ -3262,7 +3287,10 @@ server.listen(PORT, async () => {
        * предметов ноль: непустой каталог не трогается никогда, чтобы автозапуск
        * не переписал цены под живым сайтом. Отключается CATALOG_AUTOSEED=0.
        */
-      if (String(process.env.CATALOG_AUTOSEED || '1') !== '0') {
+      if (!dbHealthy) {
+        console.warn('     Наполнение пропущено: база не прошла проверку целостности.');
+        console.warn('     Сначала восстановите её: node deploy/repair-db.js --apply');
+      } else if (String(process.env.CATALOG_AUTOSEED || '1') !== '0') {
         console.warn(' [~] Наполняю каталог из rust.tm…');
         try {
           const seeder = require('./services/catalogSeed');
