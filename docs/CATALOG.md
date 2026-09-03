@@ -63,6 +63,24 @@
 
 ## Цены
 
+> **Источник цен и каталога — [rust.tm](https://rust.tm/docs-v2), а не Steam.**
+> Один открытый запрос `GET /api/v2/prices/class_instance/RUB.json` даёт около
+> 4900 позиций сразу в рублях, с `classid` и с цветом редкости `text_color`.
+> Курс валют для цен больше не нужен. Steam остался нужен только ради картинок
+> (`GetAssetClassInfo` по `classid`), и `STEAM_API_KEY` теперь необязателен.
+>
+> Опорная цена — `avg_price`, средняя цена сделок, а не лучшее текущее
+> предложение: у 62% позиций средней нет, а `price` у части предметов задран
+> одиночным лотом. Полная политика с замерами — в
+> [services/rustTm.js](../services/rustTm.js).
+>
+> Реализация: [services/rustTm.js](../services/rustTm.js) — цены,
+> [services/catalogSeed.js](../services/catalogSeed.js) — наполнение,
+> `deploy/prices.js` и `deploy/seed-catalog.js` — ручной запуск.
+>
+> Раздел ниже описывает прежний путь через обход Steam Market. Он всё ещё
+> работает и остаётся запасным, но цены больше не берутся оттуда.
+
 Steam отдаёт только USD (`sell_price` в центах). Конвертация делается здесь:
 
 ```
