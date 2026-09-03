@@ -1693,19 +1693,38 @@ function imageOnDisk(img) {
 }
 
 /**
- * Кейс, к которому привязан тир.
+ * Кейс, привязанный к тиру ЯВНО настройкой админки. null — привязки нет.
  *
- * Тир может ссылаться на настоящий кейс: `{ name, threshold, slug: 'case-4' }`.
- * Тогда с него берутся название, картинка и состав. Если ссылки нет — берём
- * кейс по порядковому номеру, как было раньше.
+ * Отделено от tierCase намеренно, и это не косметика.
+ *
+ * Фронт определяет «этот кейс — ступень лестницы» сравнением слагов:
+ *
+ *   j = tierViews.find(t => t.caseSlug === слаг_открытого_кейса)
+ *   isChainCase = j !== null
+ *
+ * А дальше кнопка открытия подменяется состоянием ступени: `locked` даёт
+ * «Откройте предыдущий», `collecting` — «Пополните». Поэтому любой слаг,
+ * попавший в caseSlug, отбирает у настоящего кейса кнопку открытия.
+ *
+ * Раньше tierCase при отсутствии привязки возвращал кейс по порядковому
+ * номеру, и пять ступеней захватывали первые пять кейсов каталога. Игрок
+ * забирал бесплатный кейс, следующие ступени становились locked — и на
+ * обычных кейсах появлялось «Откройте предыдущий».
+ */
+function tierLinkedCase(tier, cases) {
+  const slug = tier && (tier.slug || tier.caseSlug || tier.case);
+  if (!slug) return null;
+  return cases.find(c => String(c.slug) === String(slug) || String(c.id) === String(slug)) || null;
+}
+
+/**
+ * Кейс тира для показа: явная привязка, иначе любой по порядку.
+ *
+ * Годится ТОЛЬКО для названия и картинки. Для caseSlug использовать нельзя —
+ * см. tierLinkedCase.
  */
 function tierCase(tier, idx, cases) {
-  const slug = tier && (tier.slug || tier.caseSlug || tier.case);
-  if (slug) {
-    const found = cases.find(c => String(c.slug) === String(slug) || String(c.id) === String(slug));
-    if (found) return found;
-  }
-  return cases[idx % Math.max(cases.length, 1)] || null;
+  return tierLinkedCase(tier, cases) || cases[idx % Math.max(cases.length, 1)] || null;
 }
 
 function tierImage(tier, idx, cases) {
@@ -1747,6 +1766,7 @@ async function buildDepositTiers(req, mockUser) {
     else if (collected >= t.threshold) status = 'ready';
     else status = 'locked';
     const src = tierCase(t, idx, cases);
+    const linked = tierLinkedCase(t, cases);
     const img = tierImage(t, idx, cases);
     const label = t.name || (src && src.name) || `Кейс ${idx + 1}`;
     return {
@@ -1756,7 +1776,10 @@ async function buildDepositTiers(req, mockUser) {
       // Дубли под другим именем — на случай, если где-то читается name/image.
       name: label,
       image: img,
-      caseSlug: src ? src.slug : null,
+      // Только явная привязка. Кейс, взятый «по порядку» для картинки, сюда
+      // попадать не должен: фронт по этому полю опознаёт ступень и отбирает
+      // у настоящего кейса кнопку открытия.
+      caseSlug: linked ? linked.slug : null,
       threshold: t.threshold,
       collected: Math.min(collected, t.threshold),
       status
