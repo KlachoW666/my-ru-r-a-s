@@ -373,6 +373,8 @@ app.post('/api/v1/admin/auth/logout', (req, res) => {
 // =====================================================
 
 // GET items list (with pagination & search)
+require('./contentRoutes').register({ app, DB_PATH, requireAdminJWT });
+
 app.get('/api/v1/admin/cases/items', requireAdminJWT, async (req, res) => {
     try {
         const { page = 1, limit = 20, search } = req.query;
@@ -1079,23 +1081,9 @@ app.get('/api/v1/admin/stats/online', requireAdminJWT, (req, res) => {
     res.json({ success: true, data: { online: 142, peak: 387, registered: 4521 } });
 });
 
-app.get('/api/v1/admin/users', requireAdminJWT, async (req, res) => {
-    const rows = await dbAll(`SELECT * FROM users ORDER BY id DESC`);
-    res.json({ success: true, data: rows, total: rows.length });
-});
+require('./userRoutes').register({ app, dbAll, dbGet, dbRun, requireAdminJWT });
 
-app.get('/api/v1/admin/banners', requireAdminJWT, async (req, res) => {
-    const rows = await dbAll(`SELECT * FROM banners`);
-    res.json({ success: true, data: rows, total: rows.length });
-});
-
-app.post('/api/v1/admin/banners', requireAdminJWT, async (req, res) => {
-    const { title, image, url, position } = req.body;
-    const result = await dbRun(`INSERT INTO banners (title, image, url, position) VALUES (?,?,?,?)`, [title, image, url, position || 0]);
-    res.json({ success: true, data: { id: result.lastID, ...req.body } });
-});
-
-app.put('/api/v1/admin/banners/:id', requireAdminJWT, (req, res) => res.json({ success: true }));
+require('./bannerRoutes').register({ app, dbAll, dbGet, dbRun, requireAdminJWT });
 
 app.get('/api/v1/admin/pages', requireAdminJWT, async (req, res) => {
     const rows = await dbAll(`SELECT * FROM pages`);

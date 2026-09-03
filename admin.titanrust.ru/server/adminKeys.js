@@ -59,6 +59,11 @@ function generateKey() {
 
 function register({ app, db, dbAll, dbGet, dbRun, generateAdminJWT, requireAdminJWT, access }) {
 
+  // sqlite3 opens the database asynchronously. On a fresh database two bare
+  // db.run() calls can reach SQLite before the table-creation statement has
+  // completed, which makes the index statement crash the whole admin server.
+  // Keep the dependency explicit and handle both errors instead of emitting an
+  // unhandled Statement error.
   db.run(`CREATE TABLE IF NOT EXISTS admin_access_keys (
       id INTEGER PRIMARY KEY AUTOINCREMENT,
       key_hash TEXT UNIQUE,
@@ -70,8 +75,18 @@ function register({ app, db, dbAll, dbGet, dbRun, generateAdminJWT, requireAdmin
       last_used_at TIMESTAMP,
       expires_at TIMESTAMP,
       revoked_at TIMESTAMP
-  )`);
-  db.run(`CREATE INDEX IF NOT EXISTS idx_admin_keys_hash ON admin_access_keys(key_hash)`);
+  )`, (tableError) => {
+    if (tableError) {
+      console.error('[Admin keys] Failed to create admin_access_keys:', tableError.message);
+      return;
+    }
+    db.run(
+      `CREATE INDEX IF NOT EXISTS idx_admin_keys_hash ON admin_access_keys(key_hash)`,
+      (indexError) => {
+        if (indexError) console.error('[Admin keys] Failed to create key index:', indexError.message);
+      }
+    );
+  });
 
   // -------------------------------------------------------------------------
   // Вход
