@@ -163,10 +163,50 @@ function register({app,DB_PATH,requireAdminJWT}) {
     const data=await Promise.all(rows.map(r=>fullCase(db,r)));
     return {data:data.map(c=>({...c,items:c.items.map(i=>({catalogItemName:i.name,chanceRtp96:i.chance,rarity:i.rarity,itemPrice:i.price}))}))};
   });
+  /*
+   * Слаг из названия.
+   *
+   * Форма создания кейса в админке слаг НЕ отправляет: прежний обработчик
+   * делал его сам из названия. При переносе маршрутов сюда это потерялось, и
+   * создание кейса стало падать с «Некорректный slug» — в интерфейсе это
+   * выглядит как «Server Error».
+   *
+   * Кириллица переводится в латиницу, иначе у русского названия слаг выходил
+   * бы пустым.
+   */
+  const TRANSLIT={'а':'a','б':'b','в':'v','г':'g','д':'d','е':'e','ё':'yo','ж':'zh','з':'z','и':'i','й':'y','к':'k','л':'l','м':'m','н':'n','о':'o','п':'p','р':'r','с':'s','т':'t','у':'u','ф':'f','х':'kh','ц':'ts','ч':'ch','ш':'sh','щ':'shch','ъ':'','ы':'y','ь':'','э':'e','ю':'yu','я':'ya'};
+  function slugify(text) {
+    let out='';
+    for(const ch of String(text||'').toLowerCase()) out+=TRANSLIT[ch]!==undefined?TRANSLIT[ch]:ch;
+    return out.replace(/[^a-z0-9_-]/g,'-').replace(/-+/g,'-').replace(/^-|-$/g,'');
+  }
+
+  /*
+   * Слаг уникален в схеме (UNIQUE на cases.slug), поэтому два кейса с
+   * одинаковым названием иначе дали бы ошибку записи вместо понятного
+   * результата. Добавляем числовой суффикс.
+   */
+  async function uniqueSlug(db,base,ownId) {
+    const root=base||`case-${Date.now()}`;
+    for(let n=0;n<200;n++){
+      const candidate=n?`${root}-${n+1}`:root;
+      const row=await db.get('SELECT id FROM cases WHERE slug = ?',[candidate]);
+      if(!row||(ownId!=null&&String(row.id)===String(ownId))) return candidate;
+    }
+    return `${root}-${Date.now()}`;
+  }
+
   async function saveCase(req,db,existing) {
     const b=req.body.data||req.body,old=existing||{};
-    const name=b.name??old.name,slug=b.slug??old.slug;
+    const name=b.name??old.name;
     if(typeof name!=='string'||!name.trim())invalid('Название кейса обязательно');
+
+    // Слаг прислали — проверяем строго, как и раньше. Не прислали — делаем
+    // из названия сами, как делал прежний обработчик.
+    let slug=b.slug??old.slug;
+    if(slug===undefined||slug===null||String(slug).trim()===''){
+      slug=await uniqueSlug(db,slugify(name),old.id);
+    }
     if(typeof slug!=='string'||!/^[a-z0-9][a-z0-9_-]*$/.test(slug))invalid('Некорректный slug');
     const price=number(b.price??old.price,'price');if(price<=0)invalid('Цена должна быть больше нуля');
     const seriesId=b.seriesId===null||b.seriesId===''?null:b.seriesId??old.seriesId??null;
