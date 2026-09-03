@@ -103,7 +103,10 @@ function makeBattlesService({ queryAdminDb, getAdminDb, getCaseItemsFromDb, getF
       uid: b.uid,
       battleId: b.uid,
       name: b.name,
-      status: b.status,
+      // Наружу — имя, понятное фронту; ниже serverSeed сверяется по
+      // внутреннему b.status, и это намеренно.
+      status: STATUS_OUT[b.status] || b.status,
+      statusRaw: b.status,
       rounds: b.rounds,
       totalPrice: b.total_price,
       maxPlayers: b.max_players,
@@ -151,6 +154,30 @@ function makeBattlesService({ queryAdminDb, getAdminDb, getCaseItemsFromDb, getF
    * Исключение — сам создатель и уже вошедшие игроки: им свой замес в лобби
    * видеть надо, иначе после создания он пропадает с глаз.
    */
+  /*
+   * Статусы наружу и внутрь.
+   *
+   * Внутри и в админке остаются waiting / running / finished — их менять
+   * нельзя, на них завязаны переходы состояний и запросы. Наружу отдаются
+   * имена, которые понимает собранный фронт.
+   */
+  const STATUS_OUT = { waiting: 'PENDING', running: 'ACTIVE', finished: 'RESOLVED' };
+
+  /*
+   * Что означает фильтр из вкладки лобби. Вкладка «Активные» — это и
+   * ожидающие игроков замесы, и уже идущие: игрок хочет видеть оба.
+   */
+  const FILTER_IN = {
+    active: ['waiting', 'running'],
+    pending: ['waiting'],
+    completed: ['finished'],
+    finished: ['finished'],
+    // Имена, которыми фронт называет статусы в других местах.
+    PENDING: ['waiting'],
+    ACTIVE: ['running'],
+    RESOLVED: ['finished']
+  };
+
   async function list({ status, viewerId } = {}) {
     await ensureSchema();
     const viewer = viewerId != null && viewerId !== '' ? String(viewerId) : null;
@@ -168,8 +195,15 @@ function makeBattlesService({ queryAdminDb, getAdminDb, getCaseItemsFromDb, getF
       where.push(`(b.is_private = 0 OR b.is_private IS NULL)`);
     }
     if (status && status !== 'all') {
-      where.push(`b.status = ?`);
-      params.push(status);
+      /*
+       * Фильтр приходит с фронта во «внешних» именах (active, completed), а
+       * иногда — во внутренних, если запрос делает админка или скрипт.
+       * Понимаем и то и другое; неизвестное значение сравниваем как есть,
+       * чтобы не проглотить опечатку молча.
+       */
+      const wanted = FILTER_IN[status] || FILTER_IN[String(status).toLowerCase()] || [status];
+      where.push(`b.status IN (${wanted.map(() => '?').join(',')})`);
+      params.push(...wanted);
     }
 
     const rows = await queryAdminDb(

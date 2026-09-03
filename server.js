@@ -308,7 +308,7 @@ async function _getLiveItemsUncached() {
     console.error('[Каталог] База не ответила и кэш пуст, отдаю аварийный список');
   }
   if (rows && rows.length > 0) {
-    return rows.map(r => ({
+    return rows.filter(r => !r.admin_disabled).map(r => ({
       id: `db-${r.id}`,
       name: r.name || r.market_hash_name,
       marketHashName: r.market_hash_name,
@@ -362,7 +362,9 @@ function warnEmptyCatalog() {
 // Get live series / categories from Admin DB with non-empty cases filtering
 async function getLiveSeries() {
   const dbSeries = await queryAdminDb(`SELECT * FROM series WHERE status = 'active' ORDER BY id ASC`);
-  const dbCases = await queryAdminDb(`SELECT * FROM cases WHERE archived = 0 ORDER BY sortOrder ASC`);
+  const dbCases = await queryAdminDb(`SELECT c.* FROM cases c LEFT JOIN series s ON s.id=c.seriesId
+    WHERE c.archived = 0 AND c.isActive = 1 AND c.status = 'active'
+      AND (c.seriesId IS NULL OR s.status = 'active') ORDER BY c.sortOrder ASC`);
   const items = await getLiveItems();
 
   /*
@@ -419,9 +421,8 @@ async function getLiveSeries() {
       volatility: c.volatility || "AVERAGE",
       isBlogger: c.isBlogger === 1,
       seriesId: sId,
-      // Свой состав кейса. Пустой он бывает у только что созданного в админке
-      // кейса — тогда показываем образец каталога, иначе плитка была бы голой.
-      items: composition.get(c.id) || items.slice(0, 10)
+      // Пустой состав остаётся пустым: предметы других кейсов не подставляем.
+      items: composition.get(c.id) || []
     };
   };
 
@@ -463,8 +464,8 @@ async function getLiveSeries() {
     });
   }
 
-  // If no series and no cases exist in DB, fallback to default mock series
-  if (seriesList.length === 0) {
+  // A successful empty result must not resurrect demo cases.
+  if (seriesList.length === 0 && dbCases.failed) {
     return [
       {
         id: 1,
@@ -1125,6 +1126,11 @@ app.post(['/api/v1/cases/open', '/api/v1/cases/:slug/open'], async (req, res) =>
 
     const dbCases = await queryAdminDb(`SELECT * FROM cases WHERE slug = ? OR id = ?`, [slug, slug]);
     const c = dbCases[0];
+    if (!c) return res.status(404).json({status:'error',code:'CASE_NOT_FOUND',message:'Кейс не найден'});
+    const series = c.seriesId ? (await queryAdminDb('SELECT status FROM series WHERE id=?',[c.seriesId]))[0] : null;
+    if (c.isActive === 0 || c.status !== 'active' || (c.seriesId && series?.status !== 'active')) {
+      return res.status(409).json({status:'error',code:'CASE_INACTIVE',message:'Кейс или его серия деактивированы'});
+    }
     const casePrice = c ? (c.price || 49) : 49;
     const totalCost = casePrice * quantity;
 
@@ -1831,6 +1837,7 @@ app.get(['/api/v1/upgrader/items', '/api/v1/upgrader'], async (req, res) => {
     `upg:${page}:${limit}:${req.query.priceMin || ''}:${req.query.priceMax || ''}:${req.query.search || ''}:${sort}`,
     30000,
     () => queryItems({
+      upgraderEnabled: true,
       search: req.query.search,
       minPrice: req.query.priceMin != null ? Number(req.query.priceMin) : undefined,
       maxPrice: req.query.priceMax != null ? Number(req.query.priceMax) : undefined,
@@ -1875,7 +1882,7 @@ const UPGRADER_MAX_MULT = 100;
 app.post('/api/v1/upgrader/place', async (req, res) => {
   try {
     const body = req.body || {};
-    const catalog = await getLiveItems();
+    const catalog = (await getLiveItems()).filter(item => item.upgraderEnabled);
     const byId = new Map(catalog.map(i => [String(i.id), i]));
 
     /*
@@ -1959,6 +1966,29 @@ app.post('/api/v1/upgrader/place', async (req, res) => {
     const ticket = fairFloat(serverSeed, clientSeed, nonce);
     const won = ticket < chance;
 
+    /*
+     * Номер билета для стрелки.
+     *
+     * Бандл считает угол как ticket / 10000 * 360 и ЗАЖИМАЕТ его в сектор
+     * исхода (landing-*.js, функция cr): выигрыш — [14, 166] градусов,
+     * проигрыш — [194, 346]. Зажим, а не пересчёт: любой угол вне сектора
+     * просто прилипает к его границе.
+     *
+     * Поэтому мало отдать билет целым числом. Если просто округлить долю до
+     * 0..9999, то больше половины проигрышей дадут угол меньше 194 и стрелка
+     * встанет ровно на границу — тот же эффект, только реже.
+     *
+     * Раскладываем бросок ВНУТРИ его сектора: считаем, какую долю сектора он
+     * занял, и переводим в диапазон углов этого сектора. Стрелка ходит по
+     * всему сектору, а исход по-прежнему определяет честный бросок.
+     */
+    const SECTOR = won ? [389, 4611] : [5389, 9611];
+    const span = won ? chance : 1 - chance;
+    const within = span > 0
+      ? Math.min(1, Math.max(0, (won ? ticket : ticket - chance) / span))
+      : 0;
+    const displayTicket = Math.round(SECTOR[0] + within * (SECTOR[1] - SECTOR[0]));
+
     // Предмет-цель: ближайший по стоимости из каталога, а не skins[0].
     // Цель выбрана игроком — её и показываем, а не «похожую по цене».
     let bestItem = explicitTarget
@@ -1996,7 +2026,10 @@ app.post('/api/v1/upgrader/place', async (req, res) => {
         upgradeId: `upg-${Date.now()}-${nonce}`,
         won,
         chance: +chance.toFixed(6),
-        ticket: +ticket.toFixed(6),
+        // Номер билета для стрелки, разложенный по сектору исхода — см.
+        // выше. ticketFloat рядом: по нему проверяется честность броска.
+        ticket: displayTicket,
+        ticketFloat: +ticket.toFixed(6),
         betAmount: Math.round(betAmount),
         totalItemsValue: Math.round(itemsValue || betAmount),
         winAmount,
