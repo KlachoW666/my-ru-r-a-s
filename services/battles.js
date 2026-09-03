@@ -81,9 +81,9 @@ function makeBattlesService({ queryAdminDb, getAdminDb, getCaseItemsFromDb, getF
     for (const slug of slugs) {
       const rows = await queryAdminDb(`SELECT * FROM cases WHERE slug = ? OR id = ?`, [slug, slug]);
       const c = rows[0];
-      if (!c) continue;
-      let items = await getCaseItemsFromDb(c.id);
-      if (!items || !items.length) items = await getFallbackItems();
+      if (!c) throw new Error(`Кейс не найден: ${slug}`);
+      const items = await getCaseItemsFromDb(c.id);
+      if (!items || !items.length || items.failed) throw new Error(`Кейс не содержит доступных предметов: ${slug}`);
       out.push({ row: c, items });
     }
     return out;
@@ -95,8 +95,17 @@ function makeBattlesService({ queryAdminDb, getAdminDb, getCaseItemsFromDb, getF
     const slugs = JSON.parse(b.case_slugs || '[]');
     const cases = await queryAdminDb(
       slugs.length
-        ? `SELECT slug, name, price, image FROM cases WHERE slug IN (${slugs.map(() => '?').join(',')})`
-        : `SELECT slug, name, price, image FROM cases WHERE 0`, slugs);
+        ? `SELECT * FROM cases WHERE slug IN (${slugs.map(() => '?').join(',')})`
+        : `SELECT * FROM cases WHERE 0`, slugs);
+    if (players.failed || cases.failed) throw new Error('Не удалось загрузить батл');
+    const bySlug = new Map(cases.map(c => [c.slug, c]));
+    // IN deduplicates rows; the game needs one case per opening in its original order.
+    const orderedCases = Array.from({ length: Number(b.rounds) }, () => slugs).flat().map(slug => {
+      const c = bySlug.get(slug);
+      if (!c) throw new Error(`Кейс батла не найден: ${slug}`);
+      return { caseId: String(c.id), id: c.slug, slug: c.slug, name: c.name,
+        price: Number(c.price), image: fixImageUrl(c.image), volatility: c.volatility || 'AVERAGE' };
+    });
 
     const dto = {
       id: b.uid,
@@ -107,8 +116,14 @@ function makeBattlesService({ queryAdminDb, getAdminDb, getCaseItemsFromDb, getF
       // внутреннему b.status, и это намеренно.
       status: STATUS_OUT[b.status] || b.status,
       statusRaw: b.status,
-      rounds: b.rounds,
+      rounds: [],
+      roundRepeats: Number(b.rounds),
+      roundCount: orderedCases.length,
       totalPrice: b.total_price,
+      totalPot: Math.round(Number(b.total_price) * Number(b.max_players) * 100) / 100,
+      prize: b.status === 'finished' ? Math.round(Number(b.total_price) * players.length * 100) / 100 : 0,
+      slots: Number(b.max_players),
+      mode: 'NORMAL',
       maxPlayers: b.max_players,
       playersCount: players.length,
       isPrivate: b.is_private === 1,
@@ -116,8 +131,14 @@ function makeBattlesService({ queryAdminDb, getAdminDb, getCaseItemsFromDb, getF
       finishedAt: b.finished_at,
       winnerId: b.winner_id,
       serverSeed: b.status === 'finished' ? b.server_seed : undefined,
+      serverHash: b.server_seed ? crypto.createHash('sha256').update(b.server_seed).digest('hex') : undefined,
+      creatorId: String(b.creator_id),
+      createdBy: String(b.creator_id),
       creator: { id: b.creator_id, username: b.creator_name, name: b.creator_name, avatar: b.creator_avatar },
-      cases: cases.map(c => ({ slug: c.slug, id: c.slug, name: c.name, price: c.price, image: c.image })),
+      cases: orderedCases,
+      participants: players.map(p => ({ slot: p.slot, userId: String(p.user_id),
+        userName: p.username, userAvatar: fixImageUrl(p.avatar), isBot: p.is_bot === 1,
+        botOrigin: p.is_bot === 1 ? 'MANUAL' : null })),
       players: players.map(p => ({
         slot: p.slot,
         id: p.user_id,
@@ -133,11 +154,28 @@ function makeBattlesService({ queryAdminDb, getAdminDb, getCaseItemsFromDb, getF
 
     if (withDrops) {
       const drops = await queryAdminDb(
-        `SELECT * FROM battle_drops WHERE battle_id = ? ORDER BY round ASC, slot ASC`, [b.id]);
+        `SELECT * FROM battle_drops WHERE battle_id = ? ORDER BY round ASC, id ASC`, [b.id]);
+      if (drops.failed) throw new Error('Не удалось загрузить результаты батла');
       dto.drops = drops.map(d => ({
         round: d.round, slot: d.slot,
         name: d.item_name, image: d.item_image, price: d.item_price, rarity: d.item_rarity
       }));
+      // Legacy round means a repetition of all selected cases. Reconstruct the
+      // per-case round using the insertion order within each repetition / slot.
+      const counts = new Map(), roundMap = new Map();
+      for (const d of drops) {
+        const key = `${d.round}:${d.slot}`, index = counts.get(key) || 0;
+        counts.set(key, index + 1);
+        const round = Number(d.round) * slugs.length + index + 1;
+        const player = players.find(p => p.slot === d.slot);
+        if (!player) throw new Error('У результата батла нет участника');
+        if (!roundMap.has(round)) roundMap.set(round, { round, results: [] });
+        roundMap.get(round).results.push({ userId: String(player.user_id), winAmount: Number(d.item_price),
+          item: { itemId: `battle-drop-${d.id}`, name: d.item_name, image: fixImageUrl(d.item_image),
+            price: Number(d.item_price), rarity: d.item_rarity } });
+      }
+      dto.rounds = [...roundMap.values()].sort((a, b) => a.round - b.round);
+      dto.currentRound = dto.rounds.length;
     }
     return dto;
   }

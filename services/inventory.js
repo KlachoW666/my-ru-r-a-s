@@ -20,6 +20,12 @@
  */
 
 const crypto = require('crypto');
+const { transaction } = require('./sqliteTransaction');
+const cents = value => {
+  const n = Number(value), c = Math.round(n * 100);
+  if (!Number.isFinite(n) || n < 0 || !Number.isSafeInteger(c)) throw new Error('Некорректная сумма');
+  return c;
+};
 
 /** 1 — старое поведение: выигрыш сразу деньгами. */
 const AUTO_SELL = process.env.AUTO_SELL_WINS === '1';
@@ -32,10 +38,11 @@ const TRADE_LINK_RE = /^https:\/\/steamcommunity\.com\/tradeoffer\/new\/\?partne
 function makeInventoryService({ queryAdminDb, getAdminDb, adjustBalanceById, recordTransactionById, fixImageUrl }) {
   let schemaReady = false;
 
-  const run = (sql, params = []) => new Promise((resolve) => {
+  const run = (sql, params = []) => new Promise((resolve, reject) => {
     const db = getAdminDb();
-    if (!db) return resolve(null);
-    db.run(sql, params, function (err) { db.close(); resolve(err ? null : this); });
+    if (!db) return reject(new Error('Database unavailable'));
+    db.configure('busyTimeout', 5000);
+    db.run(sql, params, function (err) { const result={lastID:this.lastID,changes:this.changes}; db.close(()=>err?reject(err):resolve(result)); });
   });
 
   async function ensureSchema() {
@@ -98,23 +105,48 @@ function makeInventoryService({ queryAdminDb, getAdminDb, adjustBalanceById, rec
    */
   async function award(userId, item, { source = 'case', ref = '' } = {}) {
     await ensureSchema();
-    const price = Math.round(Number(item.price) || 0);
+    return transaction(getAdminDb, tx => awardInTransaction(tx, userId, item, {source,ref}));
+  }
+
+  async function awardInTransaction(tx, userId, item, {source='case',ref=''}={}) {
+    const price = cents(item.price) / 100;
     const status = AUTO_SELL ? 'sold' : 'owned';
 
     const numericId = typeof item.id === 'string' && item.id.startsWith('db-')
       ? parseInt(item.id.slice(3), 10) : (parseInt(item.id, 10) || null);
 
-    const r = await run(
+    const r = await tx.run(
       `INSERT INTO inventory (user_id, item_id, market_hash_name, name, image, price, rarity, color, source, source_ref, status)
        VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
       [String(userId), numericId, item.marketHashName || item.name, item.name,
        item.image, price, item.rarity, item.color || item.colorHex, source, ref, status]);
 
     if (AUTO_SELL) {
-      await adjustBalanceById(userId, price, source + '_win', item.name);
+      const credited = await tx.run('UPDATE users SET balance=ROUND(balance+?,2) WHERE id=?',[price,userId]);
+      if (credited.changes !== 1) throw new Error('Пользователь не найден');
+      await tx.run('INSERT INTO transactions(user_id,type,amount,comment) VALUES(?,?,?,?)',[userId,source+'_win',price,item.name]);
       return { mode: 'sold', value: price, id: r ? r.lastID : null };
     }
     return { mode: 'inventory', value: price, id: r ? r.lastID : null };
+  }
+
+  // The entire opening either commits or leaves both money and inventory intact.
+  async function settleCase(userId, {cost, drops, ref}) {
+    await ensureSchema();
+    const costCents=cents(cost);
+    if (!Array.isArray(drops) || !drops.length || drops.length>5) throw new Error('Некорректное количество кейсов');
+    drops.forEach(d=>cents(d.price));
+    return transaction(getAdminDb, async tx=>{
+      const debit=await tx.run('UPDATE users SET balance=ROUND(balance-?,2) WHERE id=? AND ROUND(balance*100)>=?', [costCents/100,userId,costCents]);
+      if(debit.changes!==1) throw Object.assign(new Error('Недостаточно средств или баланс недоступен'),{code:'INSUFFICIENT_BALANCE',status:400});
+      const awards=[];
+      for(const d of drops) awards.push(await awardInTransaction(tx,userId,d,{source:'case',ref}));
+      await tx.run('INSERT INTO transactions(user_id,type,amount,comment) VALUES(?,?,?,?)',[userId,'case_open',-costCents/100,`Открытие: ${ref} x${drops.length}`]);
+      const balance=(await tx.get('SELECT balance FROM users WHERE id=?',[userId])).balance;
+      return {balance,newBalance:balance,winnings:awards.reduce((sum,a)=>sum+cents(a.value),0)/100,
+        rewardDestination:AUTO_SELL?'balance':'inventory',inventoryIds:awards.map(a=>a.id),
+        sellFeePercent:SELL_FEE_PERCENT};
+    });
   }
 
   // ---------------------------------------------------------------------------
@@ -128,6 +160,7 @@ function makeInventoryService({ queryAdminDb, getAdminDb, adjustBalanceById, rec
     const rows = await queryAdminDb(
       `SELECT * FROM inventory WHERE user_id = ?${where} ORDER BY price DESC, id DESC LIMIT ?`,
       [...params, limit]);
+    if(rows.failed) throw new Error('Инвентарь временно недоступен');
     const total = rows.reduce((a, r) => a + (Number(r.price) || 0), 0);
     return { items: rows.map(dto), count: rows.length, totalValue: total };
   }
@@ -137,26 +170,34 @@ function makeInventoryService({ queryAdminDb, getAdminDb, adjustBalanceById, rec
   // ---------------------------------------------------------------------------
 
   async function sell(userId, ids) {
-    await ensureSchema();
-    const list = (Array.isArray(ids) ? ids : [ids]).map(Number).filter(Boolean);
+    const list = [...new Set((Array.isArray(ids) ? ids : [ids]).map(Number))];
+    if(list.some(id=>!Number.isSafeInteger(id)||id<=0)||list.length>1000) return {error:'INVALID_ITEMS',message:'Некорректный список предметов'};
     if (!list.length) return { error: 'NO_ITEMS', message: 'Не выбрано ни одного предмета' };
-
-    const rows = await queryAdminDb(
+    try {
+    await ensureSchema();
+    if(!Number.isFinite(SELL_FEE_PERCENT)||SELL_FEE_PERCENT<0||SELL_FEE_PERCENT>100) throw new Error('Invalid sell fee');
+    return await transaction(getAdminDb,async tx=>{
+    const rows = await tx.all(
       `SELECT * FROM inventory WHERE user_id = ? AND status = 'owned' AND id IN (${list.map(() => '?').join(',')})`,
       [String(userId), ...list]);
-    if (!rows.length) return { error: 'NOT_FOUND', message: 'Предметы не найдены в инвентаре' };
+    if (rows.length !== list.length) return { error: 'NOT_FOUND', message: 'Часть предметов уже продана, выведена или недоступна. Обновите инвентарь.' };
 
-    const gross = rows.reduce((a, r) => a + (Number(r.price) || 0), 0);
-    const payout = Math.round(gross * (1 - SELL_FEE_PERCENT / 100));
+    const grossCents = rows.reduce((a, r) => a + cents(r.price), 0);
+    const gross = grossCents / 100;
+    const payout = Math.round(grossCents * (1 - SELL_FEE_PERCENT / 100)) / 100;
 
-    await run(
+    await tx.run(
       `UPDATE inventory SET status = 'sold', updated_at = CURRENT_TIMESTAMP
        WHERE id IN (${rows.map(() => '?').join(',')})`, rows.map(r => r.id));
 
-    const balance = await adjustBalanceById(userId, payout, 'item_sell',
-      rows.length === 1 ? rows[0].name : `Продажа предметов: ${rows.length} шт.`);
+    const credited=await tx.run('UPDATE users SET balance=ROUND(balance+?,2) WHERE id=?',[payout,userId]);
+    if(credited.changes!==1) throw new Error('Пользователь не найден');
+    await tx.run('INSERT INTO transactions(user_id,type,amount,comment) VALUES(?,?,?,?)',[userId,'item_sell',payout,`Продажа предметов: ${rows.length} шт.`]);
+    const balance=(await tx.get('SELECT balance FROM users WHERE id=?',[userId])).balance;
 
     return { ok: true, sold: rows.length, gross, payout, feePercent: SELL_FEE_PERCENT, balance };
+    });
+    } catch(error) { console.error('[Inventory sale]',error.message); return {error:'DB',message:'Продажа не выполнена. Предметы и баланс не изменены; попробуйте снова.'}; }
   }
 
   async function sellAll(userId) {
@@ -257,7 +298,7 @@ function makeInventoryService({ queryAdminDb, getAdminDb, adjustBalanceById, rec
   }
 
   return {
-    ensureSchema, award, list, sell, sellAll,
+    ensureSchema, award, settleCase, list, sell, sellAll,
     requestWithdraw, listWithdrawals, cancelWithdraw, userStats,
     AUTO_SELL, TRADE_LINK_RE
   };

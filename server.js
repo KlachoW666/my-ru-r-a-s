@@ -1186,8 +1186,11 @@ require('./services/gameAccess').register({ app, queryAdminDb });
 require('./services/wagerGuard').register({ app, deposits });
 app.post(['/api/v1/cases/open', '/api/v1/cases/:slug/open'], async (req, res) => {
   try {
-    const slug = req.body.slug || req.params.slug || 'limit';
-    const quantity = parseInt(req.body.quantity || req.body.count || 1) || 1;
+    const slug = req.body?.slug || req.params.slug || 'limit';
+    const quantity = Number(req.body?.quantity ?? req.body?.count ?? 1);
+    if (!Number.isInteger(quantity) || quantity < 1 || quantity > 5) {
+      return res.status(400).json({status:'error',code:'INVALID_QUANTITY',message:'Выберите от 1 до 5 кейсов'});
+    }
 
     const dbCases = await queryAdminDb(`SELECT * FROM cases WHERE slug = ? OR id = ?`, [slug, slug]);
     const c = dbCases[0];
@@ -1196,8 +1199,9 @@ app.post(['/api/v1/cases/open', '/api/v1/cases/:slug/open'], async (req, res) =>
     if (c.isActive === 0 || c.status !== 'active' || (c.seriesId && series?.status !== 'active')) {
       return res.status(409).json({status:'error',code:'CASE_INACTIVE',message:'Кейс или его серия деактивированы'});
     }
-    const casePrice = c ? (c.price || 49) : 49;
-    const totalCost = casePrice * quantity;
+    const casePrice = Math.round(Number(c.price) * 100) / 100;
+    if (!Number.isFinite(casePrice) || casePrice < 0) return res.status(409).json({status:'error',code:'CASE_MISCONFIGURED',message:'Некорректная цена кейса'});
+    const totalCost = Math.round(casePrice * 100) * quantity / 100;
 
     const user = (await currentUser(req, mockUser)) || guestUser();
 
@@ -1237,7 +1241,10 @@ app.post(['/api/v1/cases/open', '/api/v1/cases/:slug/open'], async (req, res) =>
         message: `Недостаточно средств: нужно ${totalCost} ₽, на балансе ${balanceBefore} ₽`
       });
     }
-    let balanceAfter = await adjustBalance(req, mockUser, -totalCost);
+    // Повторная атомарная проверка и само списание выполняются вместе с
+    // выдачей предметов ниже. Эта ранняя проверка нужна только для понятного
+    // ответа без генерации раунда при заведомо пустом балансе.
+    let balanceAfter = balanceBefore;
 
     // Честный бросок с ПРЕДВАРИТЕЛЬНОЙ фиксацией сида: хэш серверного сида
     // опубликован до игры (GET /fair/state), сам сид раскрывается только при
@@ -1252,24 +1259,6 @@ app.post(['/api/v1/cases/open', '/api/v1/cases/:slug/open'], async (req, res) =>
         id: 0, name: "Кейс пуст", price: 0,
         image: "/assets/battles/winner-boar.png", rarity: "REGULAR", color: "#756767"
       };
-
-      // Реальное открытие попадает в живую ленту и вытесняет синтетику.
-      pushLiveDrop(makeWin({
-        item: {
-          name: winningItem.name,
-          price: winningItem.price,
-          image: winningItem.image,
-          rarity: winningItem.rarity,
-          colorHex: winningItem.color
-        },
-        user: { id: user.id, name: user.username, avatar: user.avatar },
-        eventType: 'CASE',
-        caseSlug: slug,
-        caseName: c ? c.name : '',
-        caseImage: c ? c.image : null,
-        betAmount: casePrice,
-        wonAt: nowSec
-      }));
 
       drops.push({
         itemId: winningItem.id,
@@ -1289,19 +1278,19 @@ app.post(['/api/v1/cases/open', '/api/v1/cases/:slug/open'], async (req, res) =>
 
     const winnings = drops.reduce((a, d) => a + (Number(d.price) || 0), 0);
 
-    // Предметы кладём в инвентарь. При AUTO_SELL_WINS=1 сервис сам переведёт
-    // их в деньги — это прежнее поведение, оставлено переключателем.
-    for (const d of drops) {
-      await inventory.award(user.id, {
-        id: d.id, name: d.name, image: d.image, price: d.price,
-        rarity: d.rarity, color: d.color
-      }, { source: 'case', ref: slug });
-    }
-    // Здесь деньги уже проведены, и баланс нужен только для ответа: если
-    // прочитать не вышло, показываем то, что посчитали сами.
-    balanceAfter = (await getBalance(req, mockUser)) ?? balanceAfter;
-    await recordTransaction(req, 'case_open', -totalCost, `Открытие: ${c ? c.name : slug} x${quantity}`);
-    await recordTransaction(req, 'case_win', winnings, drops.map(d => d.name).join(', ').slice(0, 200));
+    // Списание, предметы и запись истории — одна SQLite-транзакция. Раньше
+    // сбой на втором или последующем предмете оставлял игрока без денег.
+    const settlement = await inventory.settleCase(user.id, {
+      cost: totalCost, drops, ref: c ? c.name : slug
+    });
+    balanceAfter = settlement.balance;
+
+    // Лента обновляется только после успешного финансового коммита.
+    for (const d of drops) pushLiveDrop(makeWin({
+      item: {name:d.name,price:d.price,image:d.image,rarity:d.rarity,colorHex:d.color},
+      user: {id:user.id,name:user.username,avatar:user.avatar}, eventType:'CASE',
+      caseSlug:slug,caseName:c?c.name:'',caseImage:c?c.image:null,betAmount:casePrice,wonAt:nowSec
+    }));
 
     res.json({
       status: "success",
@@ -1312,6 +1301,12 @@ app.post(['/api/v1/cases/open', '/api/v1/cases/:slug/open'], async (req, res) =>
         items: drops,
         drops: drops,
         winnings,
+        rewardDestination: settlement.rewardDestination,
+        inventoryIds: settlement.inventoryIds,
+        sellFeePercent: settlement.sellFeePercent,
+        rewardMessage: settlement.rewardDestination === 'inventory'
+          ? `Скины на ${winnings.toFixed(2)} ₽ добавлены в инвентарь. Баланс изменился только на стоимость открытия.`
+          : `Скины автоматически проданы, ${winnings.toFixed(2)} ₽ зачислены на баланс.`,
         newBalance: balanceAfter,
         balance: balanceAfter,
         // serverHash опубликован ДО игры. Сам serverSeed раскрывается при смене
@@ -1326,7 +1321,7 @@ app.post(['/api/v1/cases/open', '/api/v1/cases/:slug/open'], async (req, res) =>
     });
   } catch (e) {
     console.error("POST /cases/open error:", e);
-    res.status(500).json({ status: "error", message: e.message });
+    res.status(e.status || 500).json({ status: "error", code:e.code || 'CASE_OPEN_FAILED', message: e.message });
   }
 });
 
