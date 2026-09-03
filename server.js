@@ -1627,24 +1627,11 @@ app.get(['/api/v1/live/recent', '/api/v1/drops/recent'], async (req, res) => {
 });
 
 // Stats
-// Реальные счётчики из транзакций. Онлайн считаем по активности за 15 минут,
-// подмешивая базовый фон из BASE_ONLINE, чтобы пустой сайт не выглядел мёртвым.
+// Контракт шапки: data.stats.online. Старые поля оставлены для других клиентов.
+const globalStats = require('./services/globalStats').makeGlobalStats({ queryAdminDb, baseOnline: process.env.BASE_ONLINE });
 app.get(['/api/v1/stats/global', '/api/v1/stats'], async (req, res) => {
-  const data = await cached('globalStats', 30000, async () => {
-    const one = async (sql) => Number((await queryAdminDb(sql))[0]?.v || 0);
-    const opened = await one("SELECT COUNT(*) AS v FROM transactions WHERE type='case_open'");
-    const upgrades = await one("SELECT COUNT(*) AS v FROM transactions WHERE type='upgrade'");
-    const battlesN = await one("SELECT COUNT(*) AS v FROM battles WHERE status='finished'");
-    const active = await one(
-      "SELECT COUNT(DISTINCT user_id) AS v FROM transactions WHERE created_at >= datetime('now','-15 minutes')");
-    return {
-      onlineCount: Number(process.env.BASE_ONLINE || 0) + active,
-      openedCasesCount: opened,
-      upgradesCount: upgrades,
-      battlesCount: battlesN
-    };
-  });
-  res.json({ status: "success", data });
+  try { res.json({status:'success',data:await globalStats.read()}); }
+  catch(error) { console.error('[Stats]',error);res.status(503).json({status:'error',message:'Статистика временно недоступна'}); }
 });
 
 // Deposit chain state
@@ -3098,6 +3085,9 @@ app.get('*', (req, res) => {
 // Server instance
 const server = http.createServer(app);
 const wss = new WebSocketServer({ server, path: '/ws' });
+const statsTimer = setInterval(() => globalStats.publish(wss).catch(error=>console.error('[Stats broadcast]',error)),15000);
+statsTimer.unref();
+server.on('close',()=>clearInterval(statsTimer));
 
 wss.on('connection', (ws) => {
   ws.send(JSON.stringify({ event: 'connected', data: { status: 'online' } }));
