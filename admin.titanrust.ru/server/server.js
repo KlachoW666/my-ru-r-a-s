@@ -58,6 +58,39 @@ app.use(cors({
   credentials: true
 }));
 app.use(express.json({ limit: '10mb' }));
+
+/*
+ * Форма ошибки для фронта админки.
+ *
+ * Собранный интерфейс достаёт текст ошибки отсюда (index-*.js, функция fE):
+ *
+ *   t.response?.data?.error?.message ?? ""
+ *
+ * То есть ждёт ВЛОЖЕННЫЙ объект error с полем message. Сервер же во всех
+ * маршрутах отдаёт плоское { success: false, message: '...' }. Совпадения
+ * нет, fE возвращает пустую строку, и интерфейс подставляет общую фразу по
+ * коду ответа: 400 показывается как «Invalid input», 500 — как «Server
+ * error. Please try again later.».
+ *
+ * Из-за этого НИ ОДНО сообщение сервера в админку не доходило: ни «Некорректный
+ * slug», ни «Предмет не найден в каталоге», ни причина внутренней ошибки.
+ * Оператор всегда видел одну и ту же бесполезную фразу.
+ *
+ * Правим в одном месте, а не в каждом обработчике: подмешиваем error.message
+ * в любой ответ, где success === false и есть message. Плоское поле остаётся —
+ * его читают другие места и тесты.
+ */
+app.use((req, res, next) => {
+  const json = res.json.bind(res);
+  res.json = (body) => {
+    if (body && typeof body === 'object' && body.success === false
+        && typeof body.message === 'string' && !body.error) {
+      body = { ...body, error: { message: body.message, code: body.code } };
+    }
+    return json(body);
+  };
+  next();
+});
 app.use(express.urlencoded({ extended: true }));
 
 // =====================================================
