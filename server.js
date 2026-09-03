@@ -63,12 +63,66 @@ const { makeFairnessService } = require('./services/fairness');
 // Это убирает прежнее поведение, когда баланс жил только в памяти процесса и
 // сбрасывался при каждом рестарте.
 
+/**
+ * Баланс игрока в рублях, либо null — если он неизвестен.
+ *
+ * null возвращается для АВТОРИЗОВАННОГО игрока, когда базу прочитать не
+ * удалось или строки пользователя в ней нет. Раньше в обоих случаях
+ * подставлялся баланс мокового пользователя (5420.50), потому что
+ * queryAdminDb при ошибке отдаёт пустой массив, а пустой массив неотличим
+ * от «ничего не нашлось».
+ *
+ * На повреждённой базе это выливалось в выдачу несуществующих денег: игрок
+ * видел 5420 рублей и играл на них, а запись обратно молча не проходила.
+ *
+ * Заглушка осталась там, где она и задумана: гость и моковый режим.
+ */
 async function getBalance(req, mockUser) {
   if (req.auth && !req.auth.mock) {
     const rows = await queryAdminDb(`SELECT balance FROM users WHERE id = ?`, [req.auth.sub]);
-    if (rows.length) return Number(rows[0].balance) || 0;
+    if (rows.failed) return null;
+    if (!rows.length) return null;
+    return Number(rows[0].balance) || 0;
   }
+
+  /*
+   * Сюда попадает и гость: attachAuth ставит req.auth = verifyJWT(token), и
+   * без действующего токена это null — то есть НЕ «моковый режим», а просто
+   * неавторизованный посетитель.
+   *
+   * Раньше и ему отдавался моковый баланс 5420.50. В разработке это удобно, в
+   * бою — раздача несуществующих денег любому, кто открыл сайт без входа:
+   * баланс показывался, ставки принимались, а списывать было нечего.
+   *
+   * Моковые деньги остаются только там, где моковый режим включён осознанно.
+   * ALLOW_MOCK_AUTH истинен при ALLOW_MOCK_AUTH=1 ИЛИ когда NODE_ENV не
+   * равен production — второе условие и делает забытый NODE_ENV опасным.
+   */
+  if (!ALLOW_MOCK_AUTH) return 0;
   return Number(mockUser.balance) || 0;
+}
+
+/**
+ * Баланс для денежной операции. Вернул null — операцию проводить нельзя,
+ * ответ клиенту уже отправлен.
+ *
+ * Отдельная обёртка нужна, чтобы ни одна игра не начиналась с неизвестного
+ * баланса: отказать в ставке неприятно, но несравнимо лучше, чем провести
+ * её на выдуманные деньги.
+ */
+async function balanceForSpending(req, res, mockUser) {
+  const balance = await getBalance(req, mockUser);
+  if (balance === null) {
+    console.error('[Баланс] Не прочитан для пользователя'
+                + ` ${req.auth && req.auth.sub}: операция отклонена`);
+    res.status(503).json({
+      status: "error",
+      code: "BALANCE_UNAVAILABLE",
+      message: "Баланс сейчас недоступен. Попробуйте через минуту."
+    });
+    return null;
+  }
+  return balance;
 }
 
 /**
@@ -112,6 +166,14 @@ async function recordTransaction(req, type, amount, comment = '') {
 /** Меняет баланс на delta. min — нижняя граница, ниже которой списание не идёт. */
 async function adjustBalance(req, mockUser, delta) {
   const current = await getBalance(req, mockUser);
+  /*
+   * Неизвестный баланс изменять нельзя: current + delta дало бы NaN, а
+   * попытка «починить» его нулём списала бы игроку весь счёт. Вызывающий код
+   * обязан был проверить баланс заранее через balanceForSpending.
+   */
+  if (current === null) {
+    throw Object.assign(new Error('Баланс недоступен'), { code: 'BALANCE_UNAVAILABLE' });
+  }
   const next = Math.max(0, +(current + delta).toFixed(2));
   if (req.auth && !req.auth.mock) {
     await new Promise((resolve) => {
@@ -586,8 +648,8 @@ const mockConfig = {
 let mockUser = {
   id: "76561198991234567",
   steamId: "76561198991234567",
-  username: "Kaban_Pro",
-  name: "Kaban_Pro",
+  username: "Satchel_Dev",
+  name: "Satchel_Dev",
   avatar: mockAvatar,
   avatarFull: mockAvatar,
   balance: 5420.50,
@@ -1119,6 +1181,7 @@ async function getFallbackItems() {
   return [];
 }
 
+require('./services/gameAccess').register({ app, queryAdminDb });
 app.post(['/api/v1/cases/open', '/api/v1/cases/:slug/open'], async (req, res) => {
   try {
     const slug = req.body.slug || req.params.slug || 'limit';
@@ -1164,7 +1227,8 @@ app.post(['/api/v1/cases/open', '/api/v1/cases/:slug/open'], async (req, res) =>
       });
     }
 
-    const balanceBefore = await getBalance(req, mockUser);
+    const balanceBefore = await balanceForSpending(req, res, mockUser);
+    if (balanceBefore === null) return;
     if (balanceBefore < totalCost) {
       return res.status(400).json({
         status: "error", code: "INSUFFICIENT_BALANCE",
@@ -1231,7 +1295,9 @@ app.post(['/api/v1/cases/open', '/api/v1/cases/:slug/open'], async (req, res) =>
         rarity: d.rarity, color: d.color
       }, { source: 'case', ref: slug });
     }
-    balanceAfter = await getBalance(req, mockUser);
+    // Здесь деньги уже проведены, и баланс нужен только для ответа: если
+    // прочитать не вышло, показываем то, что посчитали сами.
+    balanceAfter = (await getBalance(req, mockUser)) ?? balanceAfter;
     await recordTransaction(req, 'case_open', -totalCost, `Открытие: ${c ? c.name : slug} x${quantity}`);
     await recordTransaction(req, 'case_win', winnings, drops.map(d => d.name).join(', ').slice(0, 200));
 
@@ -1948,7 +2014,8 @@ app.post('/api/v1/upgrader/place', async (req, res) => {
     // Для ответа: суммарная стоимость выбранной цели.
     const itemsValue = targetValue;
 
-    const balanceBefore = await getBalance(req, mockUser);
+    const balanceBefore = await balanceForSpending(req, res, mockUser);
+    if (balanceBefore === null) return;
     if (balanceBefore < betAmount) {
       return res.status(400).json({
         status: "error", code: "INSUFFICIENT_BALANCE",
@@ -2219,7 +2286,8 @@ app.post('/api/v1/battles/create', async (req, res) => {
     }
     const price = loaded.reduce((a, c) => a + (Number(c.row.price) || 0), 0) * rounds;
 
-    const balance = await getBalance(req, mockUser);
+    const balance = await balanceForSpending(req, res, mockUser);
+    if (balance === null) return;
     if (balance < price) {
       return res.status(400).json({
         status: "error", code: "INSUFFICIENT_BALANCE",
@@ -2266,7 +2334,8 @@ async function joinBattle(req, res, asBot) {
     if (!info) return res.status(404).json({ status: "error", code: "NOT_FOUND", message: "Замес не найден" });
 
     if (!asBot) {
-      const balance = await getBalance(req, mockUser);
+      const balance = await balanceForSpending(req, res, mockUser);
+      if (balance === null) return;
       if (balance < info.totalPrice) {
         return res.status(400).json({
           status: "error", code: "INSUFFICIENT_BALANCE",
@@ -2355,7 +2424,8 @@ app.post(['/api/v1/giveaways/:uid/join', '/api/v1/giveaway/:uid/join'], async (r
 });
 
 app.get(['/api/v1/wallet', '/api/v1/wallet/config'], async (req, res) => {
-  const balance = await getBalance(req, mockUser);
+  // Показ, а не трата: неизвестный баланс показываем нулём, не заглушкой.
+  const balance = (await getBalance(req, mockUser)) ?? 0;
   // Форма ответа снята со стора кошелька в бандле, см. services/walletConfig.js.
   // Прежняя форма фронтом не читалась вовсе: список стран выходил пустым, а под
   // ним висело «Для выбранной страны нет доступных способов пополнения».
@@ -2691,7 +2761,7 @@ app.post(['/api/v1/wallet/deposit/card/status', '/api/v1/wallet/deposit/status']
   const dto = deposits.toDto(row);
   res.json({
     status: 'success',
-    data: { ...dto, paid: dto.status === 'paid', balance: await getBalance(req, mockUser) }
+    data: { ...dto, paid: dto.status === 'paid', balance: (await getBalance(req, mockUser)) ?? 0 }
   });
 });
 
@@ -2780,7 +2850,8 @@ app.post('/api/v1/wallet/withdraw', async (req, res) => {
     });
   }
 
-  const balance = await getBalance(req, mockUser);
+  const balance = await balanceForSpending(req, res, mockUser);
+  if (balance === null) return;
   if (balance < amount) {
     return res.status(400).json({ status: 'error', code: 'INSUFFICIENT_BALANCE',
       message: `Недостаточно средств: на балансе ${balance} ₽` });
