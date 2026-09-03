@@ -1,4 +1,5 @@
 'use strict';
+const { ensureColumns } = require('./schemaCompatibility');
 
 const money = value => Number(value || 0).toFixed(2);
 function iso(value) {
@@ -8,10 +9,16 @@ function iso(value) {
 }
 
 function register({ app, dbAll, dbGet, dbRun, requireAdminJWT }) {
+  let schemaReady;
+  function ensureSchema() {
+    if (!schemaReady) schemaReady = ensureColumns({ all: dbAll, run: dbRun }, 'users')
+      .catch(error => { schemaReady = undefined; throw error; });
+    return schemaReady;
+  }
   const ok = (res, data, extra = {}) => res.json({ success: true, data, ...extra });
   const fail = (res, status, message) => res.status(status).json({ success: false, message });
   const handle = fn => async (req, res) => {
-    try { await fn(req, res); }
+    try { await ensureSchema(); await fn(req, res); }
     catch (error) { console.error('[Users]', error); fail(res, 500, 'Не удалось обработать запрос пользователя'); }
   };
   const columns = `u.id, u.username, u.steam_id, u.role, u.status, u.balance, u.created_at,

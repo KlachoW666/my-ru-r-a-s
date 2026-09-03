@@ -1,5 +1,6 @@
 'use strict';
 const sqlite = require('sqlite3');
+const { ensureColumns } = require('./schemaCompatibility');
 
 function invalid(message, status = 400) { const e = new Error(message); e.status = status; throw e; }
 function number(value, name, min = 0) {
@@ -35,6 +36,7 @@ function register({app,DB_PATH,requireAdminJWT}) {
     if (!schemaReady) schemaReady = (async()=>{
       const db=connection(DB_PATH);
       try {
+        await ensureColumns(db, 'series');
         const columns = new Set((await db.all('PRAGMA table_info(items)')).map(c=>c.name));
         for (const [name,type] of [['delisted','INTEGER DEFAULT 0'],['admin_disabled','INTEGER DEFAULT 0'],['rarity_color','TEXT'],['classid','TEXT']]) {
           if(!columns.has(name))await db.run(`ALTER TABLE items ADD COLUMN ${name} ${type}`);

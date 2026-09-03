@@ -42,6 +42,19 @@ Test Cases to Cover:
 - [integration] AC5 catalogue composition persists, invalid input leaves no partial case.
 - [integration] AC6 import toggles matching items without deleting catalogue rows.
 */
+// AC12: production series lacked sortOrder; test old schemas through real HTTP.
+test('old series schema migrates before list and schedule queries',async t=>{
+  const f=await fixture(t);
+  for(const col of ['sortOrder','description','image','titleImage']) await f.dbRun(`ALTER TABLE series DROP COLUMN ${col}`);
+  const responses=await Promise.all([f.request('GET','/cases/series'),f.request('GET','/cases/series/schedule')]);
+  for(const r of responses)assert.equal(r.status,200,JSON.stringify(r.body));
+  assert.equal(responses[0].body.data[0].name,'Standard');
+  assert.equal((await f.dbGet('SELECT isLimited FROM series WHERE id=1')).isLimited,1);
+  const saved=await f.request('PUT','/cases/series/1',{name:'Preserved',sortOrder:7,image:'/new.webp'});
+  assert.equal(saved.status,200,JSON.stringify(saved.body));
+  assert.equal((await f.dbGet('SELECT sortOrder FROM series WHERE id=1')).sortOrder,7);
+});
+
 async function fixture(t) {
   const dir=fs.mkdtempSync(path.join(os.tmpdir(),'titan-content-'));
   const DB_PATH=path.join(dir,'test.sqlite');

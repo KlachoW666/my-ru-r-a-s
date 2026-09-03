@@ -373,6 +373,7 @@ app.post('/api/v1/admin/auth/logout', (req, res) => {
 // =====================================================
 
 // GET items list (with pagination & search)
+require('./gamesRtpRoutes').register({ app, DB_PATH, requireAdminJWT });
 require('./contentRoutes').register({ app, DB_PATH, requireAdminJWT });
 
 app.get('/api/v1/admin/cases/items', requireAdminJWT, async (req, res) => {

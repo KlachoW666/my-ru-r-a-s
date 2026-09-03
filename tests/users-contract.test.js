@@ -85,6 +85,22 @@ async function fixture(t) {
   return { request, dbGet, dbRun };
 }
 
+// AC18: production used the pre-email schema. Regression checks exercise that
+// migration through HTTP, not a newly-created ideal schema (Gate 2).
+test('AC18: old user schema loads without changing balances or Steam identities', async t => {
+  const { request, dbRun, dbGet } = await fixture(t);
+  for (const column of ['email','email_verified','avatar','profile_url','trade_link','last_login_at']) {
+    await dbRun(`ALTER TABLE users DROP COLUMN ${column}`);
+  }
+  const responses = await Promise.all([request('/users'), request('/users?search=Alice'), request('/users/1')]);
+  for (const r of responses) assert.equal(r.status,200,JSON.stringify(r.body));
+  const user=responses[0].body.data.find(u=>u.userId==='1');
+  assert.equal(user.email,null);assert.equal(user.emailVerified,false);
+  assert.equal(user.balance,'150.25');assert.equal(user.identities[0].externalId,'76561198000000001');
+  assert.equal((await dbGet('SELECT password_hash FROM users WHERE id=1')).password_hash,'SECRET_HASH');
+  assert.equal((await request('/users')).status,200);
+});
+
 test('AC1: list exposes usable user identifiers', async t => {
   const { request } = await fixture(t);
   const { body } = await request('/users');
