@@ -176,6 +176,15 @@ async function seed({ db, apiKey, dryRun = false, limit = 0, onProgress } = {}) 
 
   let written = 0, created = 0, updated = 0;
   let noImage = 0, failedBatches = 0;
+
+  /*
+   * Сколько записей подряд может не пройти, прежде чем считать базу
+   * неисправной и прекратить. Двадцать — с запасом: единичные конфликты
+   * бывают, два десятка подряд означают, что писать некуда.
+   */
+  const WRITE_FAIL_LIMIT = Number(process.env.SEED_WRITE_FAIL_LIMIT || 20);
+  let writeFailStreak = 0;
+  let aborted = false;
   const known = new Set(
     (await all(db, `SELECT market_hash_name FROM items WHERE market_hash_name IS NOT NULL`))
       .map(r => String(r.market_hash_name).toLowerCase())
@@ -224,9 +233,24 @@ async function seed({ db, apiKey, dryRun = false, limit = 0, onProgress } = {}) 
       if (!dryRun) {
         try {
           await writeItem(db, row);
+          writeFailStreak = 0;
         } catch (e) {
-          // Единичная строка не должна ронять весь проход.
-          console.error(`[Seed] ${row.marketHashName}: ${e.message}`);
+          /*
+           * Единичная строка не должна ронять весь проход, но и упорствовать
+           * бессмысленно: если записи не проходят подряд, дело не в строке, а
+           * в базе. Без этого ограничения проход на повреждённой базе писал
+           * почти пять тысяч строк ошибок в лог и держал её часами.
+           */
+          writeFailStreak++;
+          if (writeFailStreak <= 5) {
+            console.error(`[Seed] ${row.marketHashName}: ${e.message}`);
+          }
+          if (writeFailStreak >= WRITE_FAIL_LIMIT) {
+            console.error(`[Seed] ${writeFailStreak} записей подряд не прошли — прекращаю.`);
+            console.error('[Seed] Похоже, база неисправна: node deploy/repair-db.js');
+            aborted = true;
+            break;
+          }
           continue;
         }
       }
@@ -238,10 +262,15 @@ async function seed({ db, apiKey, dryRun = false, limit = 0, onProgress } = {}) 
     if (typeof onProgress === 'function') {
       onProgress({ done: Math.min(i + BATCH, items.length), total: items.length, written });
     }
+    if (aborted) break;
     if (apiKey && i + BATCH < items.length) await sleep(BATCH_INTERVAL_MS);
   }
 
   const after = await all(db, `SELECT COUNT(*) AS n FROM items`);
+
+  if (aborted) {
+    return { ok: false, message: 'база не принимает записи — наполнение прекращено' };
+  }
 
   return {
     ok: true,
