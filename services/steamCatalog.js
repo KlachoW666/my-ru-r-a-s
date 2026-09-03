@@ -165,6 +165,7 @@ async function ensureCatalogSchema(db) {
     'classid TEXT',
     'icon_hash TEXT',
     'delisted INTEGER DEFAULT 0',
+    'admin_disabled INTEGER DEFAULT 0',
     'last_seen_at TIMESTAMP',
     'last_sweep_id INTEGER'
   ]) {
@@ -558,7 +559,7 @@ async function getRarityBreakdown() {
 }
 
 /** Постраничная выдача каталога с фильтрами. */
-async function queryItems({ rarity, minPrice, maxPrice, search, limit = 100, offset = 0, includeDelisted = false, sort = 'desc' } = {}) {
+async function queryItems({ rarity, minPrice, maxPrice, search, limit = 100, offset = 0, includeDelisted = false, upgraderEnabled, sort = 'desc' } = {}) {
   const db = openDb();
   if (!db) return { items: [], total: 0 };
   await ensureCatalogSchema(db);
@@ -566,6 +567,8 @@ async function queryItems({ rarity, minPrice, maxPrice, search, limit = 100, off
   const where = [];
   const params = [];
   if (!includeDelisted) where.push('delisted = 0');
+  where.push('COALESCE(admin_disabled,0) = 0');
+  if (upgraderEnabled !== undefined) { where.push('upgraderEnabled = ?'); params.push(upgraderEnabled ? 1 : 0); }
   if (rarity) { where.push('rarity = ?'); params.push(String(rarity).toUpperCase()); }
   if (minPrice != null) { where.push('price >= ?'); params.push(Number(minPrice)); }
   if (maxPrice != null) { where.push('price <= ?'); params.push(Number(maxPrice)); }
