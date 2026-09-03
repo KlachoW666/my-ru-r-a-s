@@ -717,6 +717,7 @@ const battles = makeBattlesService({
 // Заявки на пополнение. Начисление живёт только внутри confirm() — так деньги
 // не могут появиться в обход подтверждения.
 const deposits = makeDepositsService({ queryAdminDb, getAdminDb, adjustBalanceById });
+const depositLadder = require('./services/depositLadder').makeDepositLadder({ queryAdminDb, getAdminDb });
 const walletConfig = makeWalletConfig({ queryAdminDb, adminSetting });
 // Курсы валют кошелька. Обновляются сами: строки source='manual' не трогаются.
 const rates = makeRatesService({ queryAdminDb, getAdminDb, rollypay });
@@ -1182,6 +1183,7 @@ async function getFallbackItems() {
 }
 
 require('./services/gameAccess').register({ app, queryAdminDb });
+require('./services/wagerGuard').register({ app, deposits });
 app.post(['/api/v1/cases/open', '/api/v1/cases/:slug/open'], async (req, res) => {
   try {
     const slug = req.body.slug || req.params.slug || 'limit';
@@ -1683,7 +1685,6 @@ async function tierConfigAt(idx) {
 }
 
 /** Какие тиры игрок уже забрал. Ключ — id пользователя. */
-const claimedTiers = new Map();
 
 const TIER_FALLBACK_IMAGE = '/uploads/cases/1786522990114-495918520.webp';
 
@@ -1745,7 +1746,8 @@ function tierImage(tier, idx, cases) {
 async function buildDepositTiers(req, mockUser) {
   const user = (await currentUser(req, mockUser)) || guestUser();
   const key = String(user.id || 'guest');
-  const claimed = claimedTiers.get(key) || new Set();
+  const claimed = new Set(req.auth && !req.auth.mock
+    ? (await depositLadder.claimed(req.auth.sub)).map(row=>row.tier_index) : []);
 
   // Сумма депозитов игрока — из истории операций.
   let collected = 0;
@@ -1800,6 +1802,7 @@ async function buildDepositTiers(req, mockUser) {
 }
 
 app.get(['/api/v1/deposit-chain/state', '/api/v1/deposit-chain'], async (req, res) => {
+  try {
   const { tiers, activeTierIndex, collected } = await buildDepositTiers(req, mockUser);
   res.json({
     status: "success",
@@ -1815,6 +1818,10 @@ app.get(['/api/v1/deposit-chain/state', '/api/v1/deposit-chain'], async (req, re
       tiers
     }
   });
+  } catch(error) {
+    console.error('[Deposit ladder]',error);
+    res.status(503).json({status:'error',code:'CHAIN_UNAVAILABLE',message:'Не удалось загрузить состояние лестницы'});
+  }
 });
 
 // Забрать бесплатный кейс тира. Фронт зовёт это из openTier().
@@ -1823,6 +1830,8 @@ app.get(['/api/v1/deposit-chain/state', '/api/v1/deposit-chain'], async (req, re
 // CHAIN_UNAVAILABLE, CHAIN_OUT_OF_ORDER, CHAIN_INSUFFICIENT_DEPOSIT.
 // Любой другой код уходит в общий тост «что-то пошло не так».
 app.post('/api/v1/deposit-chain/open', async (req, res) => {
+  if (!req.auth || req.auth.mock) return res.status(401).json({status:'error',code:'UNAUTHORIZED',message:'Нужна авторизация'});
+  try {
   const tierIndex = Number(req.body?.tierIndex);
   const { key, claimed, tiers } = await buildDepositTiers(req, mockUser);
   const tier = tiers[tierIndex];
@@ -1855,12 +1864,10 @@ app.post('/api/v1/deposit-chain/open', async (req, res) => {
   const rolled = rollOne(dist, { serverSeed, clientSeed, nonce: tierIndex });
   const item = rolled.item || pool[0];
 
-  claimed.add(tierIndex);
-  claimedTiers.set(key, claimed);
-
   const value = Number(item?.price) || 0;
-  const balance = await adjustBalance(req, mockUser, value);
-  await recordTransaction(req, 'deposit_chain', value, `Бесплатный кейс: ${tier.caseName}`);
+  const claim = await depositLadder.claim({userId:req.auth.sub,tierIndex,threshold:Number(tier.threshold),caseName:tier.caseName,item});
+  if (!claim.ok) return res.status(claim.error==='CHAIN_INSUFFICIENT_DEPOSIT'?403:409).json({status:'error',code:claim.error,message:claim.message});
+  const balance = claim.balance;
 
   const user = (await currentUser(req, mockUser)) || guestUser();
   if (item) {
@@ -1906,6 +1913,10 @@ app.post('/api/v1/deposit-chain/open', async (req, res) => {
       serverHash, serverSeed, clientSeed, nonce: tierIndex
     }
   });
+  } catch(error) {
+    console.error('[Deposit ladder]',error);
+    res.status(503).json({status:'error',code:'CHAIN_UNAVAILABLE',message:'Не удалось обработать открытие. Обновите состояние лестницы перед повтором.'});
+  }
 });
 // Upgrader endpoints
 // Каталог апгрейдера.
@@ -2965,13 +2976,38 @@ app.use('/image', express.static(path.join(PUBLIC_DIR, 'image')));
 app.use('/packs', express.static(path.join(PUBLIC_DIR, 'packs')));
 app.use('/uploads', express.static(path.join(PUBLIC_DIR, 'uploads')));
 
-// Main assets directory
+/*
+ * Статика бандла.
+ *
+ * Имена чанков содержат хеш содержимого, поэтому их можно было бы кэшировать
+ * надолго. Но здесь этот договор нарушен намеренно: при ребрендинге
+ * содержимое картинок и части чанков заменено ПОД ПРЕЖНИМИ ИМЕНАМИ — иначе
+ * пришлось бы править ссылки внутри минифицированной сборки, которых сотни.
+ *
+ * Из-за этого посетитель, у которого файл уже в кэше, продолжал видеть старую
+ * картинку: имя не изменилось, значит браузер считает, что и содержимое то же.
+ * Так на сайте ещё долго оставался прежний логотип и силуэты, хотя на сервере
+ * лежали новые.
+ *
+ * Поэтому просим перепроверять. must-revalidate не значит «качать каждый раз»:
+ * браузер шлёт If-None-Match, и на неизменившийся файл получает 304 без тела.
+ * Трафика это почти не добавляет, а картинку показывает актуальную.
+ *
+ * Когда сборка фронта начнёт менять имена файлов честно, это правило можно
+ * будет снять.
+ */
+const ASSET_REVALIDATE = /\.(svg|png|webp|jpg|jpeg|ico|gif|avif)$/i;
+
 app.use('/assets', express.static(path.join(PUBLIC_DIR, 'assets'), {
+  etag: true,
+  lastModified: true,
   setHeaders: (res, filePath) => {
     if (filePath.endsWith('.js') || filePath.endsWith('.html')) {
       res.setHeader('Cache-Control', 'no-cache, no-store, must-revalidate');
       res.setHeader('Pragma', 'no-cache');
       res.setHeader('Expires', '0');
+    } else if (ASSET_REVALIDATE.test(filePath)) {
+      res.setHeader('Cache-Control', 'public, max-age=0, must-revalidate');
     }
   }
 }));
