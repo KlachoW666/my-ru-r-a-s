@@ -15,6 +15,7 @@
  */
 
 const crypto = require('crypto');
+const { transaction } = require('./sqliteTransaction');
 const { buildDistribution, rollOne, newServerSeed, DEFAULT_RTP } = require('./drops');
 
 const BOT_NAMES = ['Кабан-бот', 'Рейдер', 'Сталкер', 'Барсук', 'Прапор', 'Тихий'];
@@ -304,20 +305,28 @@ function makeBattlesService({ queryAdminDb, getAdminDb, getCaseItemsFromDb, getF
     const countRow = await queryAdminDb(`SELECT COUNT(*) AS c FROM battles`);
     const num = (countRow[0]?.c || 0) + 1;
 
-    const r = await run(
-      `INSERT INTO battles (uid, name, creator_id, creator_name, creator_avatar, max_players,
-                            rounds, case_slugs, total_price, status, is_private, server_seed)
-       VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, 'waiting', ?, ?)`,
-      [uid, `Замес #${num}`, String(user.id), user.username, user.avatar,
-       maxPlayers, rounds, JSON.stringify(caseSlugs), price, isPrivate ? 1 : 0, serverSeed]);
-    if (!r) return null;
+    try {
+      return await transaction(getAdminDb, async ({ run }) => {
+        const r = await run(
+          `INSERT INTO battles (uid, name, creator_id, creator_name, creator_avatar, max_players,
+                                rounds, case_slugs, total_price, status, is_private, server_seed)
+           VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, 'waiting', ?, ?)`,
+          [uid, `Замес #${num}`, String(user.id), user.username, user.avatar,
+           maxPlayers, rounds, JSON.stringify(caseSlugs), price, isPrivate ? 1 : 0, serverSeed]);
+        if (r.changes !== 1) throw new Error('Не удалось сохранить батл');
+        const creator = await run(
+          `INSERT INTO battle_players (battle_id, slot, user_id, username, avatar, is_bot)
+           VALUES (?, 0, ?, ?, ?, 0)`,
+          [r.lastID, String(user.id), user.username, user.avatar]);
+        if (creator.changes !== 1) throw new Error('Не удалось сохранить создателя батла');
 
-    await run(
-      `INSERT INTO battle_players (battle_id, slot, user_id, username, avatar, is_bot)
-       VALUES (?, 0, ?, ?, ?, 0)`,
-      [r.lastID, String(user.id), user.username, user.avatar]);
-
-    return { uid, battleId: uid, id: r.lastID, isPrivate: !!isPrivate };
+        return { uid, battleId: uid, id: r.lastID, isPrivate: !!isPrivate };
+      });
+    } catch (error) {
+      // A room without its creator must not be reported as successfully created.
+      // The root route uses null to trigger its legacy refund path.
+      return null;
+    }
   }
 
   async function join({ uid, user, asBot = false, viewerId }) {
@@ -332,6 +341,9 @@ function makeBattlesService({ queryAdminDb, getAdminDb, getCaseItemsFromDb, getF
     if (!verdict.allowed) return { error: 'FORBIDDEN', message: 'Замес приватный — нужна ссылка от создателя' };
 
     if (b.status !== 'waiting') return { error: 'ALREADY_STARTED', message: 'Замес уже начался' };
+    if (asBot && (!user?.id || user.isGuest || String(b.creator_id) !== String(user.id))) {
+      return { error: 'FORBIDDEN', message: 'Только создатель может добавить бота' };
+    }
 
     const players = await queryAdminDb(`SELECT * FROM battle_players WHERE battle_id = ?`, [b.id]);
     if (players.length >= b.max_players) return { error: 'FULL', message: 'Мест больше нет' };
@@ -340,16 +352,21 @@ function makeBattlesService({ queryAdminDb, getAdminDb, getCaseItemsFromDb, getF
     }
 
     const slot = players.length;
+    let inserted;
     if (asBot) {
-      await run(
+      inserted = await run(
         `INSERT INTO battle_players (battle_id, slot, user_id, username, avatar, is_bot)
          VALUES (?, ?, ?, ?, ?, 1)`,
         [b.id, slot, `bot-${b.id}-${slot}`, BOT_NAMES[slot % BOT_NAMES.length], BOT_AVATAR]);
     } else {
-      await run(
+      inserted = await run(
         `INSERT INTO battle_players (battle_id, slot, user_id, username, avatar, is_bot)
          VALUES (?, ?, ?, ?, ?, 0)`,
         [b.id, slot, String(user.id), user.username, user.avatar]);
+    }
+
+    if (!inserted || inserted.changes !== 1) {
+      return { error: 'JOIN_FAILED', message: 'Не удалось сохранить участника батла' };
     }
 
     const full = slot + 1 >= b.max_players;
@@ -423,7 +440,10 @@ function makeBattlesService({ queryAdminDb, getAdminDb, getCaseItemsFromDb, getF
     };
   }
 
-  return { ensureSchema, list, getByUid, findRow, canView, create, join, play, loadCases };
+  const paid = require('./caseBattleSettlement').makeCaseBattleSettlement({
+    getAdminDb, ensureSchema, fixImageUrl, botNames: BOT_NAMES, botAvatar: BOT_AVATAR
+  });
+  return { ensureSchema, list, getByUid, findRow, canView, create, join, play, loadCases, ...paid };
 }
 
 module.exports = { makeBattlesService };

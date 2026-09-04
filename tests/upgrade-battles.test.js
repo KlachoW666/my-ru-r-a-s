@@ -56,6 +56,18 @@ async function fixture(t){
 }
 const body={requestId:'create-request-00001',roundBet:100,targetIds:[1,2,3],clientSeed:'creator-seed'};
 test('module exports persistent battle service',()=>assert.equal(typeof load().makeUpgradeBattles,'function'));
+test('service initializes its schema before the admin process starts',async t=>{
+ const dir=fs.mkdtempSync(path.join(os.tmpdir(),'upgrade-battles-cold-'));
+ const file=path.join(dir,'test.sqlite');
+ const getDb=()=>new sqlite.Database(file);
+ const query=(s,p=[])=>new Promise((ok,no)=>{const d=getDb();d.all(s,p,(e,r)=>d.close(()=>e?no(e):ok(r)));});
+ await query('CREATE TABLE app_settings(key TEXT PRIMARY KEY,value TEXT,updated_at TEXT DEFAULT CURRENT_TIMESTAMP)');
+ const service=load().makeUpgradeBattles({getDb});
+ const config=await service.config();
+ assert.equal(config.enabled,false);
+ assert.equal((await query("SELECT COUNT(*) n FROM sqlite_master WHERE type='table' AND name='upgrade_battles'"))[0].n,1);
+ t.after(()=>{fs.unlinkSync(file);fs.rmdirSync(dir);});
+});
 test('creation reserves once without counting an unplayed wager',async t=>{
  const {service,query}=await fixture(t);
  const a=await service.create(1,body);const b=await service.create(1,body);
@@ -131,4 +143,30 @@ test('tie splits cents without inventing a payout',()=>{
  assert.deepEqual(load().splitPot([100,100],201),[101,100]);
  assert.deepEqual(load().splitPot([0,0],0),[0,0]);
  assert.deepEqual(load().splitPot([0,200],200),[0,200]);
+});
+test('banning the creator cancels the room before opponent debit',async t=>{
+ const {service,query}=await fixture(t);const room=await service.create(1,body);
+ await query("UPDATE users SET status='banned' WHERE id=1");
+ await assert.rejects(service.join(2,room.uid,{clientSeed:'join'}));
+ assert.equal((await service.get(room.uid)).status,'cancelled');
+ assert.equal((await query('SELECT balance FROM users WHERE id=1'))[0].balance,10000);
+ assert.equal((await query('SELECT balance FROM users WHERE id=2'))[0].balance,10000);
+});
+for(const amount of [1.10,0.29])test(`exact configured boundary ${amount} accepts legal cents`,async t=>{
+ const {service,query}=await fixture(t);
+ await query('UPDATE items SET price=?',[amount*2]);
+ await service.configure({enabled:true,rtp:.95,minRoundBet:amount,maxRoundBet:amount,waitSeconds:900},'admin');
+ const r=await service.create(1,{...body,roundBet:amount});assert.equal(r.roundBet,amount);
+});
+test('real wager triggers count only completed entries',async t=>{
+ const {service,query,getDb}=await fixture(t);
+ const deposits=require('../services/deposits').makeDepositsService({getAdminDb:getDb,queryAdminDb:query});
+ await deposits.ensureSchema();
+ await query('INSERT INTO wallet_wagers VALUES(1,100000,100000),(2,100000,100000)');
+ const first=await service.create(1,body);assert.equal((await deposits.wager(1)).remaining,'1000.00');
+ await service.cancel(1,first.uid);assert.equal((await deposits.wager(1)).remaining,'1000.00');
+ const second=await service.create(1,{...body,requestId:'test-wager-second-room'});
+ await service.join(2,second.uid,{clientSeed:'join'});
+ assert.equal((await deposits.wager(1)).remaining,'700.00');assert.equal((await deposits.wager(2)).remaining,'700.00');
+ await service.join(2,second.uid,{clientSeed:'join'});assert.equal((await deposits.wager(2)).remaining,'700.00');
 });

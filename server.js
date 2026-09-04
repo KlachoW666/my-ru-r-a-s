@@ -57,6 +57,7 @@ const rollypay = require('./services/rollypay');
 const { makeGiveawaysService } = require('./services/giveaways');
 const { makeInventoryService } = require('./services/inventory');
 const { makeFairnessService } = require('./services/fairness');
+const { makeUpgraderSettlement } = require('./services/upgraderSettlement');
 
 // --- Баланс ------------------------------------------------------------------
 // Авторизованному пишем в users.balance, гостю — в mockUser (в памяти).
@@ -1183,6 +1184,8 @@ async function getFallbackItems() {
 }
 
 require('./services/gameAccess').register({ app, queryAdminDb });
+const upgradeBattles = require('./services/upgradeBattles').makeUpgradeBattles({ getDb: getAdminDb });
+require('./services/upgradeBattleRoutes').register({ app, service: upgradeBattles });
 require('./services/wagerGuard').register({ app, deposits });
 app.post(['/api/v1/cases/open', '/api/v1/cases/:slug/open'], async (req, res) => {
   try {
@@ -1276,21 +1279,23 @@ app.post(['/api/v1/cases/open', '/api/v1/cases/:slug/open'], async (req, res) =>
       });
     }
 
-    const winnings = drops.reduce((a, d) => a + (Number(d.price) || 0), 0);
-
     // Списание, предметы и запись истории — одна SQLite-транзакция. Раньше
     // сбой на втором или последующем предмете оставлял игрока без денег.
     const settlement = await inventory.settleCase(user.id, {
       cost: totalCost, drops, ref: c ? c.name : slug
     });
+    const winnings = settlement.winnings;
     balanceAfter = settlement.balance;
 
     // Лента обновляется только после успешного финансового коммита.
-    for (const d of drops) pushLiveDrop(makeWin({
-      item: {name:d.name,price:d.price,image:d.image,rarity:d.rarity,colorHex:d.color},
-      user: {id:user.id,name:user.username,avatar:user.avatar}, eventType:'CASE',
-      caseSlug:slug,caseName:c?c.name:'',caseImage:c?c.image:null,betAmount:casePrice,wonAt:nowSec
-    }));
+    // A feed failure must not turn a committed opening into a retryable 500.
+    try {
+      for (const d of drops) pushLiveDrop(makeWin({
+        item: {name:d.name,price:d.price,image:d.image,rarity:d.rarity,colorHex:d.color},
+        user: {id:user.id,name:user.username,avatar:user.avatar}, eventType:'CASE',
+        caseSlug:slug,caseName:c?c.name:'',caseImage:c?c.image:null,betAmount:casePrice,wonAt:nowSec
+      }));
+    } catch (error) { console.error('[Cases live feed after settlement]', error.message); }
 
     res.json({
       status: "success",
@@ -1337,7 +1342,31 @@ registerAuthRoutes(app, { mockUser });
 // (см. комментарий к guestUser() в services/auth.js).
 app.get(['/api/v1/user', '/api/v1/user/me', '/api/v1/users/me', '/api/v1/profile'], async (req, res) => {
   const user = await currentUser(req, mockUser);
-  res.json({ status: "success", data: user || guestUser() });
+  const data = user || guestUser();
+  if (!data.isGuest) {
+    try {
+      const stats = await inventory.userStats(data.id);
+      Object.assign(data, {
+        bestDropItemName: stats.bestDropItemName,
+        bestDropItemPrice: stats.bestDropItemPrice,
+        bestDropItemImage: stats.bestDropItemImage
+      });
+      await ensureFavoritesSchema();
+      const favorite = (await queryAdminDb(
+        `SELECT c.id,c.slug,c.name,c.image FROM user_favorites f
+         JOIN cases c ON c.slug=f.case_slug WHERE f.user_id=? ORDER BY f.id DESC LIMIT 1`,
+        [String(data.id)]))[0];
+      if (favorite) Object.assign(data, {
+        favouriteCaseId: favorite.id,
+        favouriteCaseSlug: favorite.slug,
+        favouriteCaseName: favorite.name,
+        favouriteCaseImage: fixImageUrl(favorite.image)
+      });
+    } catch (error) {
+      console.error('[Profile summary]', error.message);
+    }
+  }
+  res.json({ status: "success", data });
 });
 
 // Считается по инвентарю и транзакциям игрока, а не выдаётся константой.
@@ -1347,6 +1376,23 @@ app.get('/api/v1/user/stats', async (req, res) => {
     return res.json({ status: "success", data: { openedCases: 0, wonAmount: 0, totalBattles: 0, upgrades: 0, inventoryCount: 0, inventoryValue: 0, bestDrop: null } });
   }
   res.json({ status: "success", data: await inventory.userStats(user.id) });
+});
+
+app.get('/api/v1/history', async (req, res) => {
+  const user = (await currentUser(req, mockUser)) || guestUser();
+  const page = Math.max(1, Number.parseInt(req.query.page, 10) || 1);
+  const limit = Math.min(100, Math.max(1, Number.parseInt(req.query.limit, 10) || 20));
+  if (user.isGuest) return res.json({ status: 'success', data: [], pagination: { page, limit, total: 0 } });
+  try {
+    const history = await inventory.gameHistory(user.id, { page, limit, type: req.query.type });
+    res.json({
+      status: 'success',
+      data: history.items,
+      pagination: { page: history.page, limit: history.limit, total: history.total }
+    });
+  } catch (error) {
+    res.status(error.status || 503).json({ status: 'error', message: error.message });
+  }
 });
 
 app.get('/api/v1/user/ban-status', (req, res) => {
@@ -1960,6 +2006,7 @@ const UPGRADER_MIN_CHANCE = 0.01;
 const UPGRADER_MAX_CHANCE = 0.95;
 const UPGRADER_MIN_MULT = 1.05;
 const UPGRADER_MAX_MULT = 100;
+const upgraderSettlement = makeUpgraderSettlement({ getDb: getAdminDb });
 
 app.post('/api/v1/upgrader/place', async (req, res) => {
   try {
@@ -2084,12 +2131,16 @@ app.post('/api/v1/upgrader/place', async (req, res) => {
       }, null);
     }
 
-    let balanceAfter = await adjustBalance(req, mockUser, -betAmount);
     const winAmount = won ? Math.round(targetValue) : 0;
-    if (won) balanceAfter = await adjustBalance(req, mockUser, winAmount);
-
-    await recordTransaction(req, 'upgrade', -Math.round(betAmount), `Апгрейд x${(targetValue / betAmount).toFixed(2)}`);
-    if (won) await recordTransaction(req, 'upgrade_win', winAmount, bestItem ? bestItem.name : '');
+    const settlement = await upgraderSettlement.settle({
+      userId: req.auth && !req.auth.mock ? Number(req.auth.sub) : null,
+      mockUser,
+      betAmount,
+      winAmount,
+      multiplier: targetValue / betAmount,
+      itemName: bestItem ? bestItem.name : ''
+    });
+    const balanceAfter = settlement.balance;
 
     if (won && bestItem) {
       const user = (await currentUser(req, mockUser)) || guestUser();
@@ -3079,6 +3130,7 @@ app.get('*', (req, res) => {
 
 // Server instance
 const server = http.createServer(app);
+require('./services/upgradeBattleRoutes').startRefundWorker(upgradeBattles, server);
 const wss = new WebSocketServer({ server, path: '/ws' });
 const statsTimer = setInterval(() => globalStats.publish(wss).catch(error=>console.error('[Stats broadcast]',error)),15000);
 statsTimer.unref();

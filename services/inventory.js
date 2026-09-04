@@ -216,34 +216,43 @@ function makeInventoryService({ queryAdminDb, getAdminDb, adjustBalanceById, rec
    * и его учётные данные. Заявка уходит в админку, раздел «Выводы».
    */
   async function requestWithdraw(userId, ids, tradeLink) {
-    await ensureSchema();
     if (!TRADE_LINK_RE.test(String(tradeLink || ''))) {
       return { error: 'BAD_TRADE_LINK', message: 'Укажите корректную ссылку для обмена Steam в профиле' };
     }
 
-    const list = (Array.isArray(ids) ? ids : [ids]).map(Number).filter(Boolean);
+    const list = [...new Set((Array.isArray(ids) ? ids : [ids]).map(Number))];
+    if (list.some(id => !Number.isSafeInteger(id) || id <= 0) || list.length > 1000) {
+      return { error: 'INVALID_ITEMS', message: 'Некорректный список предметов' };
+    }
     if (!list.length) return { error: 'NO_ITEMS', message: 'Не выбрано ни одного предмета' };
-
-    const rows = await queryAdminDb(
+    try {
+    await ensureSchema();
+    return await transaction(getAdminDb, async tx => {
+    const rows = await tx.all(
       `SELECT * FROM inventory WHERE user_id = ? AND status = 'owned' AND id IN (${list.map(() => '?').join(',')})`,
       [String(userId), ...list]);
-    if (!rows.length) return { error: 'NOT_FOUND', message: 'Предметы не найдены в инвентаре' };
+    if (rows.length !== list.length) return { error: 'NOT_FOUND', message: 'Часть предметов уже продана, выведена или недоступна. Обновите инвентарь.' };
 
     const uid = crypto.randomBytes(6).toString('hex');
-    const total = rows.reduce((a, r) => a + (Number(r.price) || 0), 0);
+    const total = rows.reduce((a, r) => a + cents(r.price), 0) / 100;
 
-    const r = await run(
+    await tx.run(
       `INSERT INTO skin_withdrawals (uid, user_id, trade_link, total_price, items_count, status)
        VALUES (?, ?, ?, ?, ?, 'pending')`,
       [uid, String(userId), tradeLink, total, rows.length]);
-    if (!r) return { error: 'DB', message: 'Не удалось создать заявку' };
 
-    // Предметы блокируются, чтобы их нельзя было продать дважды.
-    await run(
+    // Same write transaction as the selection: a concurrent sale/withdrawal
+    // cannot claim the selected items between reading and locking them.
+    await tx.run(
       `UPDATE inventory SET status = 'withdraw_pending', source_ref = ?, updated_at = CURRENT_TIMESTAMP
        WHERE id IN (${rows.map(() => '?').join(',')})`, [uid, ...rows.map(x => x.id)]);
 
     return { ok: true, uid, itemsCount: rows.length, totalPrice: total, status: 'pending' };
+    });
+    } catch (error) {
+      console.error('[Inventory withdrawal]', error.message);
+      return { error: 'DB', message: 'Заявка не создана. Предметы не изменены; попробуйте снова.' };
+    }
   }
 
   async function listWithdrawals(userId) {
@@ -266,23 +275,35 @@ function makeInventoryService({ queryAdminDb, getAdminDb, adjustBalanceById, rec
 
   /** Отмена возвращает предметы в инвентарь. */
   async function cancelWithdraw(userId, uid) {
+    try {
     await ensureSchema();
-    const rows = await queryAdminDb(
+    return await transaction(getAdminDb, async tx => {
+    const rows = await tx.all(
       `SELECT * FROM skin_withdrawals WHERE uid = ? AND user_id = ?`, [uid, String(userId)]);
     const w = rows[0];
     if (!w) return { error: 'NOT_FOUND', message: 'Заявка не найдена' };
     if (w.status !== 'pending') return { error: 'ALREADY_PROCESSED', message: 'Заявка уже обработана' };
 
-    await run(`UPDATE skin_withdrawals SET status = 'cancelled', updated_at = CURRENT_TIMESTAMP WHERE id = ?`, [w.id]);
-    await run(`UPDATE inventory SET status = 'owned', updated_at = CURRENT_TIMESTAMP WHERE source_ref = ? AND status = 'withdraw_pending'`, [uid]);
+    await tx.run(`UPDATE skin_withdrawals SET status = 'cancelled', updated_at = CURRENT_TIMESTAMP WHERE id = ?`, [w.id]);
+    await tx.run(`UPDATE inventory SET status = 'owned', updated_at = CURRENT_TIMESTAMP WHERE source_ref = ? AND user_id = ? AND status = 'withdraw_pending'`, [uid, String(userId)]);
     return { ok: true, uid, status: 'cancelled' };
+    });
+    } catch (error) {
+      console.error('[Inventory cancellation]', error.message);
+      return { error: 'DB', message: 'Отмена не выполнена. Заявка и предметы не изменены; попробуйте снова.' };
+    }
   }
 
   /** Статистика профиля — считается по инвентарю и транзакциям, а не мокается. */
   async function userStats(userId) {
     await ensureSchema();
     const one = async (sql, p) => Number((await queryAdminDb(sql, p))[0]?.v || 0);
-    const opened = await one(`SELECT COUNT(*) AS v FROM transactions WHERE user_id = ? AND type = 'case_open'`, [userId]);
+    const caseRows = await queryAdminDb(`SELECT comment FROM transactions WHERE user_id = ? AND type = 'case_open'`, [userId]);
+    if (caseRows.failed) throw new Error('Статистика профиля временно недоступна');
+    const opened = caseRows.reduce((sum, row) => {
+      const quantity = String(row.comment || '').match(/\bx(\d+)\s*$/i);
+      return sum + Math.max(1, Number(quantity?.[1]) || 1);
+    }, 0);
     const battles = await one(`SELECT COUNT(*) AS v FROM transactions WHERE user_id = ? AND type = 'battle_entry'`, [userId]);
     const upgrades = await one(`SELECT COUNT(*) AS v FROM transactions WHERE user_id = ? AND type = 'upgrade'`, [userId]);
     const won = await one(`SELECT COALESCE(SUM(price),0) AS v FROM inventory WHERE user_id = ?`, [userId]);
@@ -290,16 +311,86 @@ function makeInventoryService({ queryAdminDb, getAdminDb, adjustBalanceById, rec
       `SELECT name, price, image, rarity FROM inventory WHERE user_id = ? ORDER BY price DESC LIMIT 1`, [userId]))[0] || null;
     const inv = await list(userId, { status: 'owned', limit: 1000 });
     return {
-      openedCases: opened, totalBattles: battles, upgrades,
+      // Current profile bundle names.
+      totalCases: opened, totalBattles: battles, totalUpgrades: upgrades,
+      bestDropItemName: best?.name || null,
+      bestDropItemPrice: best ? Number(best.price) : null,
+      bestDropItemImage: best ? fixImageUrl(best.image) : null,
+      // Backward-compatible aliases used by older pages/admin adapters.
+      openedCases: opened, upgrades,
       wonAmount: Math.round(won),
       inventoryCount: inv.count, inventoryValue: Math.round(inv.totalValue),
       bestDrop: best ? { name: best.name, price: best.price, image: fixImageUrl(best.image), rarity: best.rarity } : null
     };
   }
 
+  /** Persisted game ledger in the exact shape consumed by ProfilePage. */
+  async function gameHistory(userId, input = {}) {
+    await ensureSchema();
+    const page = Math.max(1, Number.parseInt(input.page, 10) || 1);
+    const limit = Math.min(100, Math.max(1, Number.parseInt(input.limit, 10) || 20));
+    const type = String(input.type || 'all').toLowerCase();
+    const definitions = {
+      case: { stake: 'case_open', win: 'case_win', source: 'case' },
+      upgrader: { stake: 'upgrade', win: 'upgrade_win', source: 'upgrade' },
+      battle: { stake: 'battle_entry', win: 'battle_win', source: 'battle' }
+    };
+    const selected = type === 'all' ? Object.entries(definitions) : [[type, definitions[type]]];
+    if (!selected[0]?.[1]) throw Object.assign(new Error('Неизвестный тип истории'), { status: 400 });
+
+    const ledgerTypes = selected.flatMap(([, value]) => [value.stake, value.win]);
+    const placeholders = ledgerTypes.map(() => '?').join(',');
+    const ledger = await queryAdminDb(
+      `SELECT id,type,amount,comment,created_at FROM transactions
+       WHERE user_id = ? AND type IN (${placeholders}) ORDER BY id ASC`,
+      [userId, ...ledgerTypes]);
+    if (ledger.failed) throw new Error('История игр временно недоступна');
+    const inventoryRows = await queryAdminDb(
+      `SELECT id,item_id,name,image,price,source,source_ref,created_at FROM inventory
+       WHERE user_id = ? AND source IN (${selected.map(() => '?').join(',')}) ORDER BY id ASC`,
+      [String(userId), ...selected.map(([, value]) => value.source)]);
+    if (inventoryRows.failed) throw new Error('История выигрышей временно недоступна');
+
+    const entries = [];
+    const consumedInventoryIds = new Set();
+    for (const [gameType, definition] of selected) {
+      const stakes = ledger.filter(row => row.type === definition.stake);
+      for (let index = 0; index < stakes.length; index++) {
+        const row = stakes[index];
+        const nextId = stakes[index + 1]?.id ?? Number.POSITIVE_INFINITY;
+        const sameMoment = value => String(value.created_at) === String(row.created_at);
+        const wins = ledger.filter(value => value.type === definition.win &&
+          value.id > row.id && value.id < nextId);
+        const expectedItems = Math.max(1, Number(String(row.comment || '').match(/\bx(\d+)\s*$/i)?.[1]) || 1);
+        const sourceRef = String(row.comment || '').match(/^Открытие:\s*(.*?)\s+x\d+\s*$/i)?.[1];
+        const wonItems = inventoryRows.filter(value => value.source === definition.source && sameMoment(value) &&
+          !consumedInventoryIds.has(value.id) && (!sourceRef || String(value.source_ref || '') === sourceRef)).slice(0, expectedItems);
+        wonItems.forEach(value => consumedInventoryIds.add(value.id));
+        const betAmount = Math.abs(Number(row.amount) || 0);
+        const winAmount = gameType === 'case'
+          ? wonItems.reduce((sum, value) => sum + (Number(value.price) || 0), 0)
+          : wins.reduce((sum, value) => sum + Math.max(0, Number(value.amount) || 0), 0);
+        const rawDate = String(row.created_at || '');
+        const timestamp = Date.parse(/[zZ]|[+-]\d\d:?\d\d$/.test(rawDate) ? rawDate : `${rawDate.replace(' ', 'T')}Z`);
+        entries.push({
+          id: `${gameType}-${row.id}`,
+          createdAt: Number.isFinite(timestamp) ? Math.floor(timestamp / 1000) : 0,
+          betAmount,
+          winAmount,
+          multiplier: betAmount > 0 ? Number((winAmount / betAmount).toFixed(4)) : 0,
+          itemsWon: wonItems.map(value => ({ itemId: value.item_id ?? value.id, name: value.name, image: fixImageUrl(value.image) })),
+          isWin: winAmount > 0,
+          isFree: betAmount === 0
+        });
+      }
+    }
+    entries.sort((a, b) => b.createdAt - a.createdAt || String(b.id).localeCompare(String(a.id)));
+    return { items: entries.slice((page - 1) * limit, page * limit), total: entries.length, page, limit };
+  }
+
   return {
     ensureSchema, award, settleCase, list, sell, sellAll,
-    requestWithdraw, listWithdrawals, cancelWithdraw, userStats,
+    requestWithdraw, listWithdrawals, cancelWithdraw, userStats, gameHistory,
     AUTO_SELL, TRADE_LINK_RE
   };
 }

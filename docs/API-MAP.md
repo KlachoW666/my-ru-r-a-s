@@ -26,19 +26,23 @@
 | GET | `/api/v1/skins` | [331](../server.js:331) | 🔀 | весь каталог `items` |
 | POST | `/api/v1/admin/sync-skins`<br>`/api/v1/skins/sync` | [316](../server.js:316) | — | запускает `syncRustSkins(count)`, ходит в Steam |
 
-### Пользователь и конфиг
+### Пользователь и профиль
+
+Контракт проверен по `store-CliSAPz5.js`. Профиль читает не внутренние имена БД, а `userId`, `displayName`, `tradeUrl`, `linkedProviders`, `totalCases` и `totalUpgrades`.
 
 | Метод | Путь | Стр. | Источник |
 |---|---|---|---|
-| ALL | `/api/v1/auth/{refresh,me,steam,login/email,register/email}` | [585](../server.js:585) | 🎭 `mockUser` + `token: "mock_token_12345"` |
-| ALL | `/api/v1/auth/logout` | [589](../server.js:589) | 🎭 |
-| GET | `/api/v1/user`, `/user/me`, `/users/me`, `/profile` | [591](../server.js:591) | 🎭 |
-| GET | `/api/v1/user/stats` | [595](../server.js:595) | 🎭 |
-| GET | `/api/v1/user/ban-status` | [599](../server.js:599) | 🎭 |
-| GET | `/api/v1/user/favorites` | [603](../server.js:603) | 🎭 |
-| PUT | `/api/v1/user/{tradeurl,display-name,avatar}` | [608](../server.js:608) | 🎭 мутирует `mockUser` |
-| GET | `/api/v1/config`, `/config/games`, `/game/config` | [615](../server.js:615) | 🎭 `mockConfig` — флаги режимов и пути к звукам |
-| GET | `/api/v1/config/socials` | [619](../server.js:619) | 🎭 |
+| ALL | `/api/v1/auth/{refresh,me,steam,login/email,register/email}` | [registerAuthRoutes](../services/auth.js) | 🗄; мок только при `ALLOW_MOCK_AUTH=1` |
+| ALL | `/api/v1/auth/logout` | [registerAuthRoutes](../services/auth.js) | cookie |
+| GET | `/api/v1/user`, `/user/me`, `/users/me`, `/profile` | [server.js](../server.js) | 🗄 `users` + любимый кейс + лучший дроп |
+| GET | `/api/v1/user/stats` | [server.js](../server.js) | 🗄 `transactions` + `inventory` |
+| GET | `/api/v1/history?type=case|upgrader|battle&page=&limit=` | [server.js](../server.js) | 🗄 игровая история с `pagination` на верхнем уровне |
+| GET/POST/DELETE | `/api/v1/user/favorites[/:slug]` | [server.js](../server.js) | 🗄 `user_favorites` |
+| PUT | `/api/v1/user/{tradeurl,display-name,avatar}` | [server.js](../server.js) | 🗄 `users` |
+| GET | `/api/v1/config`, `/config/games`, `/game/config` | [server.js](../server.js) | 🗄 `game_configs` + fallback конфигурации |
+| GET | `/api/v1/config/socials` | [server.js](../server.js) | 🗄 `social_links` |
+
+`GET /history` — осознанное исключение из общего конверта: массив лежит в `data`, а `{page,limit,total}` — в соседнем поле `pagination`. Именно так обращается с ответом собранный профиль.
 
 ### Игровые механики
 
@@ -57,6 +61,8 @@
 | GET | `/api/v1/crate-pvp`, `/battles` | [766](../server.js:766) | 🔀 приватные замесы в список не попадают |
 | POST | `/api/v1/battles/create` | [785](../server.js:785) | 🎭 |
 | POST | `/api/v1/battles/:id/join`, `/add-bot` | [800](../server.js:800) | 🎭 |
+| GET | `/api/v1/upgrade-battles/config`, `/items`, `/`, `/:uid` | [upgradeBattleRoutes.js](../services/upgradeBattleRoutes.js) | 🗄 |
+| POST | `/api/v1/upgrade-battles/create`, `/:uid/join`, `/:uid/cancel` | [upgradeBattleRoutes.js](../services/upgradeBattleRoutes.js) | 🗄; денежные операции атомарны |
 | GET | `/api/v1/promo/active` | [649](../server.js:649) | 🎭 |
 | POST | `/api/v1/promo/{redeem,validate}` | [632](../server.js:632) | 🎭 |
 | GET | `/api/v1/wallet`, `/wallet/config` | [805](../server.js:805) | 🎭 |
@@ -124,6 +130,7 @@ app.use('/api/v1', (req, res) => res.json({ status: "success", data: [] }));  //
 | Пользователи | GET `/admin/users` | [976](../admin.titanrust.ru/server/server.js:976) |
 | Выводы | GET `/admin/withdrawals` | [1011](../admin.titanrust.ru/server/server.js:1011) |
 | **Загрузка файлов** | POST `/admin/media/upload?folder=<cases\|series\|banners\|items\|general>` | [1038](../admin.titanrust.ru/server/server.js:1038) |
+| Батлы на апгрейдах | GET `/admin/upgrade-battles`, GET/PUT `/admin/upgrade-battles/config`, GET `/:uid` | [upgradeBattleRoutes.js](../admin.titanrust.ru/server/upgradeBattleRoutes.js) |
 
 ### Заглушки (`{success:true, data:[]}`, в БД не ходят)
 

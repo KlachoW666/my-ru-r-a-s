@@ -39,6 +39,11 @@ async function ensureSchema(run){
 }
 function makeUpgradeBattles({getDb,now=Date.now}){
  const tx=fn=>transaction(getDb,fn);
+ let schemaPromise=null;
+ async function initialize(){
+  if(!schemaPromise)schemaPromise=tx(db=>ensureSchema(db.run));
+  try{return await schemaPromise;}catch(error){schemaPromise=null;throw error;}
+ }
  async function config(db){const row=await db.get("SELECT value FROM app_settings WHERE key='upgrade_battles'");if(!row)fail(503,'Сначала обновите схему админки');return configValue(JSON.parse(row.value));}
  async function enabled(db){const c=await config(db);if(!c.enabled)fail(409,'Режим временно выключен');
   const games=await db.get("SELECT value FROM app_settings WHERE key='games'");
@@ -72,17 +77,18 @@ function makeUpgradeBattles({getDb,now=Date.now}){
   await db.run("UPDATE upgrade_battles SET status='cancelled',finished_at=?,cancel_reason=? WHERE uid=?",[now(),reason,b.uid]);
  }
  async function expireIn(db){
-  const rooms=await db.all("SELECT * FROM upgrade_battles WHERE status='waiting' AND expires_at<=? LIMIT 100",[now()]);
-  for(const b of rooms)await refund(db,b,'Соперник не найден');return rooms.length;
+  const rooms=await db.all(`SELECT b.* FROM upgrade_battles b WHERE b.status='waiting' AND
+   (b.expires_at<=? OR EXISTS(SELECT 1 FROM users u WHERE u.id=b.creator_id AND u.status IS NOT 'active')) LIMIT 100`,[now()]);
+  for(const b of rooms)await refund(db,b,b.expires_at<=now()?'Соперник не найден':'Создатель недоступен для игры');return rooms.length;
  }
- async function create(userId,input){return tx(async db=>{
+ async function create(userId,input){await initialize();return tx(async db=>{
   const user=await account(db,userId);const bet=cents(input.roundBet,'ставка за раунд');
   if(typeof input.requestId!=='string'||!/^[a-zA-Z0-9_-]{16,100}$/.test(input.requestId))fail(400,'Нужен requestId длиной 16–100 символов');
   if(!Array.isArray(input.targetIds)||input.targetIds.length!==3||!input.targetIds.every(x=>Number.isSafeInteger(x)&&x>0))fail(400,'Выберите ровно три цели');
   const clientSeed=seed(input.clientSeed);const fingerprint=hash(JSON.stringify([bet,input.targetIds,clientSeed]));
   const previous=await db.get('SELECT * FROM upgrade_battles WHERE creator_id=? AND request_id=?',[userId,input.requestId]);
   if(previous){if(previous.fingerprint!==fingerprint)fail(409,'Данные повторного запроса изменились');return dto(db,previous,userId);}
-  const c=await enabled(db);if(bet<c.minRoundBet*100||bet>c.maxRoundBet*100)fail(400,'Ставка вне лимитов режима');
+  const c=await enabled(db);if(bet<cents(c.minRoundBet)||bet>cents(c.maxRoundBet))fail(400,'Ставка вне лимитов режима');
   await expireIn(db);
   const count=await db.get("SELECT COUNT(*) n FROM upgrade_battles WHERE creator_id=? AND status='waiting'",[userId]);if(count.n>=5)fail(409,'Не более пяти ожидающих батлов');
   const targets=[];
@@ -101,6 +107,7 @@ function makeUpgradeBattles({getDb,now=Date.now}){
   return dto(db,await row(db,uid),userId);
  });}
  async function join(userId,uid,input){
+  await initialize();
   // Expiration commits independently, so rejecting an expired join cannot undo its refund.
   await expire();
   return tx(async db=>{
@@ -109,7 +116,7 @@ function makeUpgradeBattles({getDb,now=Date.now}){
    const member=await db.get('SELECT * FROM upgrade_battle_players WHERE battle_uid=? AND user_id=?',[uid,userId]);
    if(member&&b.status==='finished')return dto(db,b,userId);
    if(b.status!=='waiting'||b.expires_at<=now())fail(409,'Батл уже закрыт');
-   await enabled(db);const clientSeed=seed(input.clientSeed);
+   await enabled(db);await account(db,b.creator_id);const clientSeed=seed(input.clientSeed);
    await debit(db,userId,b.round_bet_cents*3);
    await db.run('INSERT INTO upgrade_battle_players(battle_uid,user_id,slot,name,avatar,client_seed) VALUES(?,?,1,?,?,?)',[uid,userId,user.username||'Игрок',user.avatar||'',clientSeed]);
    const players=await db.all('SELECT * FROM upgrade_battle_players WHERE battle_uid=? ORDER BY slot',[uid]);
@@ -128,17 +135,17 @@ function makeUpgradeBattles({getDb,now=Date.now}){
    return dto(db,await row(db,uid),userId);
   });
  }
- const expire=()=>tx(expireIn);
- const get=async(uid,viewer)=>{await expire();return tx(async db=>dto(db,await row(db,uid),viewer));};
- const list=async(viewer,history=false)=>{await expire();return tx(async db=>({config:await config(db),battles:await Promise.all((await db.all(`SELECT * FROM upgrade_battles WHERE status ${history?"!='waiting'":"='waiting'"} ORDER BY created_at DESC LIMIT 100`)).map(b=>dto(db,b,viewer)))}));};
- const cancel=(userId,uid)=>tx(async db=>{const b=await row(db,uid);if(b.creator_id!==Number(userId))fail(403,'Отменить может только создатель');if(b.status==='finished')fail(409,'Батл уже завершён');await refund(db,b,'Отменён создателем');return dto(db,await row(db,uid),userId);});
- const configure=(input,actor)=>tx(async db=>{const c=configValue(input);await db.run("UPDATE app_settings SET value=?,updated_at=CURRENT_TIMESTAMP WHERE key='upgrade_battles'",[JSON.stringify(c)]);await db.run('INSERT INTO upgrade_battle_config_audit(actor,config_json,created_at) VALUES(?,?,?)',[String(actor),JSON.stringify(c),now()]);return c;});
- const items=(q={})=>tx(async db=>{
+ const expire=async()=>{await initialize();return tx(expireIn);};
+ const get=async(uid,viewer)=>{await initialize();await expire();return tx(async db=>dto(db,await row(db,uid),viewer));};
+ const list=async(viewer,history=false)=>{await initialize();await expire();return tx(async db=>({config:await config(db),battles:await Promise.all((await db.all(`SELECT * FROM upgrade_battles WHERE status ${history?"!='waiting'":"='waiting'"} ORDER BY created_at DESC LIMIT 100`)).map(b=>dto(db,b,viewer)))}));};
+ const cancel=async(userId,uid)=>{await initialize();return tx(async db=>{const b=await row(db,uid);if(b.creator_id!==Number(userId))fail(403,'Отменить может только создатель');if(b.status==='finished')fail(409,'Батл уже завершён');await refund(db,b,'Отменён создателем');return dto(db,await row(db,uid),userId);});};
+ const configure=async(input,actor)=>{await initialize();return tx(async db=>{const c=configValue(input);await db.run("UPDATE app_settings SET value=?,updated_at=CURRENT_TIMESTAMP WHERE key='upgrade_battles'",[JSON.stringify(c)]);await db.run('INSERT INTO upgrade_battle_config_audit(actor,config_json,created_at) VALUES(?,?,?)',[String(actor),JSON.stringify(c),now()]);return c;});};
+ const items=async(q={})=>{await initialize();return tx(async db=>{
   const search=String(q.search||'').trim().slice(0,100);const params=[];let where='upgraderEnabled=1 AND price>0';
   if(search){where+=' AND name LIKE ? ESCAPE \'!\'';params.push('%'+search.replace(/[!%_]/g,'!$&')+'%');}
   for(const [key,op] of [['minPrice','>='],['maxPrice','<=']])if(q[key]!=null&&q[key]!==''){where+=` AND price${op}?`;params.push(number(q[key],0,100000000,key));}
   return {items:await db.all(`SELECT id,name,price,image,rarity FROM items WHERE ${where} ORDER BY price ASC,id ASC LIMIT 100`,params),total:(await db.get(`SELECT COUNT(*) n FROM items WHERE ${where}`,params)).n};
- });
- return {create,join,get,list,cancel,expire,configure,items,config:()=>tx(config)};
+ });};
+ return {create,join,get,list,cancel,expire,configure,items,initialize,config:async()=>{await initialize();return tx(config);}};
 }
 module.exports={makeUpgradeBattles,ensureSchema,roll,splitPot,DEFAULT_CONFIG};

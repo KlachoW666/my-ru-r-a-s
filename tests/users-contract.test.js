@@ -2,6 +2,7 @@
 const test = require('node:test');
 const assert = require('node:assert/strict');
 const fs = require('node:fs');
+const os = require('node:os');
 const path = require('node:path');
 const vm = require('node:vm');
 const { createRequire } = require('node:module');
@@ -42,7 +43,9 @@ const sqlite = require('../admin.titanrust.ru/server/node_modules/sqlite3');
  */
 
 async function fixture(t) {
-  const db = new sqlite.Database(':memory:');
+  const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'titan-users-'));
+  const DB_PATH = path.join(dir, 'test.sqlite');
+  const db = new sqlite.Database(DB_PATH);
   const dbRun = (sql, params = []) => new Promise((resolve, reject) => db.run(sql, params, function (err) {
     err ? reject(err) : resolve({ lastID: this.lastID, changes: this.changes });
   }));
@@ -69,12 +72,19 @@ async function fixture(t) {
   if (start < 0) start = source.indexOf("app.get('/api/v1/admin/users',");
   const end = source.indexOf("require('./bannerRoutes').register", start);
   assert.ok(start >= 0 && end > start);
-  vm.runInNewContext(source.slice(start, end), { app, dbAll, dbGet, dbRun, require: createRequire(filename),
-    requireAdminJWT: (req, res, next) => {req.user={userId:99,role:'SUPER_ADMIN'};return req.headers['x-deny'] ? res.sendStatus(403) : next();} });
+  vm.runInNewContext(source.slice(start, end), { app, DB_PATH, dbAll, dbGet, dbRun, require: createRequire(filename),
+    requireAdminJWT: (req, res, next) => {
+      req.user={userId:99,role:req.headers['x-admin-role'] || 'SUPER_ADMIN'};
+      return req.headers['x-deny'] ? res.sendStatus(403) : next();
+    } });
   app.all('/api/v1/admin/*', (req, res) => res.json({ success: true, data: [], catchAll: true }));
   const server = app.listen(0, '127.0.0.1');
   await new Promise(resolve => server.once('listening', resolve));
-  t.after(async () => { await new Promise(resolve => server.close(resolve)); await new Promise(resolve => db.close(resolve)); });
+  t.after(async () => {
+    await new Promise(resolve => server.close(resolve));
+    await new Promise(resolve => db.close(resolve));
+    fs.rmSync(dir, { recursive: true, force: true });
+  });
   const request = async (url, method = 'GET', body, headers = {}) => {
     const response = await fetch(`http://127.0.0.1:${server.address().port}/api/v1/admin${url}`, {
       method, headers: { 'Content-Type': 'application/json', ...headers }, body: body === undefined ? undefined : JSON.stringify(body)
@@ -245,4 +255,25 @@ test('AC16: KYC edits persist the selected level and status', async t => {
 test('AC17: KYC rejects an unknown level', async t => {
   const { request } = await fixture(t);
   assert.equal((await request('/kyc/1', 'PUT', { status:'APPROVED', levelName:'missing' })).status, 400);
+});
+
+test('AC23: SUPER_ADMIN changes a site user role and records the reason', async t => {
+  const { request, dbGet } = await fixture(t);
+  const response = await request('/users/1/role', 'PATCH', { role: 'STREAMER', reason: 'Подтверждённый стример' });
+  assert.equal(response.status, 200, JSON.stringify(response.body));
+  assert.equal(response.body.data.user.role, 'STREAMER');
+  assert.equal((await dbGet('SELECT role FROM users WHERE id=1')).role, 'streamer');
+  const audit = await dbGet('SELECT * FROM user_role_history WHERE user_id=1');
+  assert.equal(audit.old_role, 'USER');
+  assert.equal(audit.new_role, 'STREAMER');
+  assert.equal(audit.reason, 'Подтверждённый стример');
+  assert.equal(audit.admin_user_id, '99');
+});
+
+test('AC24: role change validates authority, role and reason without modifying the user', async t => {
+  const { request, dbGet } = await fixture(t);
+  assert.equal((await request('/users/1/role', 'PATCH', { role: 'STREAMER', reason: 'Нет прав' }, { 'x-admin-role': 'ADMIN' })).status, 403);
+  assert.equal((await request('/users/1/role', 'PATCH', { role: 'SUPER_ADMIN', reason: 'Эскалация' })).status, 400);
+  assert.equal((await request('/users/1/role', 'PATCH', { role: 'STREAMER', reason: '' })).status, 400);
+  assert.equal((await dbGet('SELECT role FROM users WHERE id=1')).role, 'user');
 });

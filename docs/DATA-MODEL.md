@@ -2,13 +2,20 @@
 
 Единственная база: **`admin.titanrust.ru/server/database.sqlite`**. Путь задан в двух местах — [admin…/server.js:14](../admin.titanrust.ru/server/server.js:14) (`DB_PATH`) и [services/steamSync.js:11](../services/steamSync.js:11) (`ADMIN_DB_PATH`, его импортирует корневой `server.js`).
 
-Схема создаётся в `initDatabase()` ([admin…/server.js:48](../admin.titanrust.ru/server/server.js:48)). Внешних ключей нет — связи только по соглашению.
+Основную схему создаёт админка в `initDatabase()`. Узкие игровые миграции дополнительно выполняют свои сервисы: например, `inventory.js` и `upgradeBattles.js` создают недостающие таблицы перед первым запросом. Внешних ключей нет — связи только по соглашению.
 
 ## Схема
 
 ```
 series ──1:N──> cases ──1:N──> case_items ──N:1──> items
   (id)         (seriesId)      (case_id)          (item_id)
+
+users ──1:N──> transactions
+  │
+  ├──1:N──> inventory
+  └──1:N──> upgrade_battle_players ──N:1──> upgrade_battles
+                                              │
+                                              └──1:N──> upgrade_battle_rounds
 
 banners   pages   users   withdrawals   admin_users     (изолированы)
 ```
@@ -54,7 +61,16 @@ banners   pages   users   withdrawals   admin_users     (изолированы)
 ### Остальные
 
 - `banners` — `title`, `image`, `url`, `position`, `active`. Сайт: `WHERE active = 1 ORDER BY position`. Поля `description`/`buttonText`/цвета/`video` в БД **нет** — `getLiveBanners()` подставляет их константами ([server.js:219](../server.js:219)), меняется только картинка и ссылка.
-- `users` — `steam_id`, `balance`, `rtp` (дефолт 95.0), `role`, `status`. Игровой сервер эту таблицу **не читает** — игрок всегда `mockUser`.
+- `users` — общий профиль сайта и админки: `steam_id`, `username`, `avatar`, `balance`, `rtp`, `role`, `status`, trade-link и ограничения. В production игровой сервер определяет пользователя по JWT и читает эту строку; `mockUser` разрешён только при `ALLOW_MOCK_AUTH=1`.
+- `user_role_history` — аудит смены пользовательских ролей: старое и новое
+  значение, обязательная причина, ID администратора и время изменения.
+- `transactions` — денежный журнал и источник статистики профиля. Ставка и выплата записываются разными типами (`case_open`, `upgrade`, `upgrade_win`, `battle_entry`, `battle_win` и служебные hold-записи).
+- `inventory` — сохранённые выигрыши. `status`: `owned`, `sold`, `withdraw_pending`; `source` связывает предмет с кейсом или другой игрой.
+- `user_favorites` — связь пользователя с любимыми кейсами по `case_slug`.
+- `upgrade_battles` — снимок комнаты: статус, ставка в копейках, замороженные RTP и три цели, hash/seed и сроки.
+- `upgrade_battle_players` — два участника, их client seed, итоговая сумма и выплата.
+- `upgrade_battle_rounds` — шесть неизменяемых результатов: три раунда × два игрока.
+- `upgrade_battle_config_audit` — история правок экономики нового режима.
 - `withdrawals`, `pages`, `admin_users` (сид: `SUPER_ADMIN` / `admin123`).
 
 > **Обновлено:** каталог теперь наполняет [services/steamCatalog.js](../services/steamCatalog.js), редкость берётся из `name_color` Steam, а не из цены. Актуальное описание — [CATALOG.md](CATALOG.md). Ниже — как это устроено со стороны БД.

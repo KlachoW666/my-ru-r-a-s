@@ -242,6 +242,8 @@ const SETTINGS = {
 
 async function ensureAdminSchema({ dbRun, dbGet }) {
   for (const sql of DDL) await dbRun(sql).catch(() => {});
+  // Money-related schema must not silently fail and turn into a mock response.
+  await require('../../services/upgradeBattles').ensureSchema(dbRun);
 
   let seeded = 0;
   for (const [table, insert] of SEEDS) {

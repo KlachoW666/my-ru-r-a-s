@@ -39,6 +39,7 @@ export default defineComponent({
         inventory&&!sale.value&&result.inventoryIds?.length
           ? h('button',{type:'button',class:'btn btn-primary',style:{padding:'12px 18px',borderRadius:'12px',background:'var(--accent-primary, var(--accent))',color:'var(--text-main)'},disabled:pending.value,onClick:sell},pending.value?'Продаём…':`Продать выигрыш за ${money(payout)}${fee?` (комиссия ${fee}%)`:''}`)
           : null,
+        inventory ? h('a',{href:'/wallet/withdraw',style:{color:'var(--text-main)',textDecoration:'underline'}},'Открыть кошелёк') : null,
         error.value?h('p',{role:'alert',style:{flexBasis:'100%'}},error.value):null
       ]);
     };

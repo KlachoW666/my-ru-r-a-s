@@ -407,6 +407,7 @@ app.post('/api/v1/admin/auth/logout', (req, res) => {
 
 // GET items list (with pagination & search)
 require('./gamesRtpRoutes').register({ app, DB_PATH, requireAdminJWT });
+require('./upgradeBattleRoutes').register({ app, DB_PATH, requireAdminJWT });
 require('./contentRoutes').register({ app, DB_PATH, requireAdminJWT });
 
 app.get('/api/v1/admin/cases/items', requireAdminJWT, async (req, res) => {
@@ -1115,7 +1116,7 @@ app.get('/api/v1/admin/stats/online', requireAdminJWT, (req, res) => {
     res.json({ success: true, data: { online: 142, peak: 387, registered: 4521 } });
 });
 
-require('./userRoutes').register({ app, dbAll, dbGet, dbRun, requireAdminJWT });
+require('./userRoutes').register({ app, dbAll, dbGet, dbRun, requireAdminJWT, DB_PATH });
 
 require('./bannerRoutes').register({ app, dbAll, dbGet, dbRun, requireAdminJWT });
 

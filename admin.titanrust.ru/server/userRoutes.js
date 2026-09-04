@@ -1,5 +1,6 @@
 'use strict';
 const { ensureColumns } = require('./schemaCompatibility');
+const { transaction: sqliteTransaction } = require('../../services/sqliteTransaction');
 
 const money = value => Number(value || 0).toFixed(2);
 function iso(value) {
@@ -8,8 +9,8 @@ function iso(value) {
   return Number.isFinite(date.getTime()) ? date.toISOString() : null;
 }
 
-function register({ app, dbAll, dbGet, dbRun, requireAdminJWT,
-  getAdminDb = () => new (require('sqlite3').Database)(require('path').join(__dirname,'database.sqlite')) }) {
+function register({ app, dbAll, dbGet, dbRun, requireAdminJWT, DB_PATH,
+  getAdminDb = () => new (require('sqlite3').Database)(DB_PATH || require('path').join(__dirname,'database.sqlite')) }) {
   const deposits = require('../../services/deposits').makeDepositsService({queryAdminDb:dbAll,getAdminDb});
   let schemaReady;
   function ensureSchema() {
@@ -21,7 +22,11 @@ function register({ app, dbAll, dbGet, dbRun, requireAdminJWT,
   const fail = (res, status, message) => res.status(status).json({ success: false, message });
   const handle = fn => async (req, res) => {
     try { await ensureSchema(); await fn(req, res); }
-    catch (error) { console.error('[Users]', error); fail(res, 500, 'Не удалось обработать запрос пользователя'); }
+    catch (error) {
+      const status = Number(error?.status) || 500;
+      if (status === 500) console.error('[Users]', error);
+      fail(res, status, error?.status ? error.message : 'Не удалось обработать запрос пользователя');
+    }
   };
   const columns = `u.id, u.username, u.steam_id, u.role, u.status, u.balance, u.created_at,
     u.last_login_at, u.email, u.email_verified, u.avatar, u.profile_url, u.trade_link`;
@@ -254,10 +259,41 @@ function register({ app, dbAll, dbGet, dbRun, requireAdminJWT,
       bucket:b.bucket, deposits:money(b.deposits), withdrawals:money(b.withdrawals), betProfit:money(b.betProfit)
     })) });
   }));
+
+  const assignableRoles = new Set(['USER', 'STREAMER', 'CURR_MANAGER']);
+  app.patch('/api/v1/admin/users/:id/role', requireAdminJWT, forUser(async (req, res, row) => {
+    if (req.user?.role !== 'SUPER_ADMIN') return fail(res, 403, 'Смена роли доступна только SUPER_ADMIN');
+    const role = typeof req.body?.role === 'string' ? req.body.role.trim().toUpperCase() : '';
+    const reason = typeof req.body?.reason === 'string' ? req.body.reason.trim() : '';
+    if (!assignableRoles.has(role)) return fail(res, 400, 'Можно назначить только USER, STREAMER или CURR_MANAGER');
+    if (!reason || reason.length > 500) return fail(res, 400, 'Укажите причину смены роли длиной до 500 символов');
+
+    const result = await sqliteTransaction(getAdminDb, async tx => {
+      await tx.run(`CREATE TABLE IF NOT EXISTS user_role_history (
+        id INTEGER PRIMARY KEY AUTOINCREMENT, user_id INTEGER NOT NULL,
+        old_role TEXT NOT NULL, new_role TEXT NOT NULL, reason TEXT NOT NULL,
+        admin_user_id TEXT NOT NULL, changed_at TEXT DEFAULT CURRENT_TIMESTAMP)`);
+      const current = await tx.get('SELECT role FROM users WHERE id = ?', [row.id]);
+      if (!current) {
+        const error = new Error('Пользователь не найден'); error.status = 404; throw error;
+      }
+      const oldRole = String(current.role || 'user').toUpperCase();
+      if (!assignableRoles.has(oldRole)) {
+        const error = new Error('Административные роли меняются в разделе сотрудников'); error.status = 409; throw error;
+      }
+      if (oldRole === role) return { changed: false, oldRole };
+      await tx.run('UPDATE users SET role = ? WHERE id = ?', [role.toLowerCase(), row.id]);
+      await tx.run(`INSERT INTO user_role_history (user_id,old_role,new_role,reason,admin_user_id)
+        VALUES (?,?,?,?,?)`, [row.id, oldRole, role, reason, String(req.user.userId)]);
+      return { changed: true, oldRole };
+    });
+    ok(res, { user: dto({ ...row, role: role.toLowerCase() }), changed: result.changed });
+  }));
+
   // These controls previously returned fake success. Keep them explicit until the
   // shared financial/security services implement the operation end to end.
   for (const [method, route] of [
-    ['patch','/users/:id/role'], ['put','/users/:id/analytics-exclusion'],
+    ['put','/users/:id/analytics-exclusion'],
     ['get','/rtp/users/:id/tier'], ['put','/rtp/users/:id/tier'], ['post','/rtp/users/:id/tier/reset'],
     ['post','/deposit-chain/users/:id/enroll'], ['post','/deposit-chain/users/:id/claims/:tierIndex/void']
   ]) app[method]('/api/v1/admin'+route, requireAdminJWT, forUser(async (req,res) => {
