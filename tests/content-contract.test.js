@@ -55,6 +55,26 @@ test('old series schema migrates before list and schedule queries',async t=>{
   assert.equal((await f.dbGet('SELECT sortOrder FROM series WHERE id=1')).sortOrder,7);
 });
 
+// AC13: the production database can predate the current case form. Both create
+// and edit must run only after the additive compatibility migration finishes.
+test('old case schema migrates before creating and editing cases',async t=>{
+  const f=await fixture(t);
+  for(const col of ['sortOrder','isBlogger','exclusiveTo','seriesId','status','isActive','archived','category']) {
+    await f.dbRun(`ALTER TABLE cases DROP COLUMN ${col}`);
+  }
+  for(const col of ['ticketRangeFrom','ticketRangeTo']) await f.dbRun(`ALTER TABLE case_items DROP COLUMN ${col}`);
+  const created=await f.request('POST','/cases',{name:'Legacy create',slug:'legacy-create',price:75,
+    sortOrder:4,isBlogger:true,exclusiveTo:'STREAMER',items:[{id:1,chance:100,ticketRangeFrom:1,ticketRangeTo:1000000}]});
+  assert.equal(created.status,200,JSON.stringify(created.body));
+  const edited=await f.request('PUT',`/cases/${created.body.data.id}`,{name:'Legacy edited',price:80,
+    sortOrder:6,isBlogger:false,items:[{id:2,chance:100,ticketRangeFrom:1,ticketRangeTo:1000000}]});
+  assert.equal(edited.status,200,JSON.stringify(edited.body));
+  const row=await f.dbGet('SELECT * FROM cases WHERE id=?',[created.body.data.id]);
+  assert.equal(row.name,'Legacy edited');assert.equal(row.sortOrder,6);assert.equal(row.isActive,1);
+  const composition=await f.dbGet('SELECT * FROM case_items WHERE case_id=?',[created.body.data.id]);
+  assert.equal(composition.item_id,2);assert.equal(composition.ticketRangeTo,1000000);
+});
+
 test('picker price comparisons filter before pagination',async t=>{
   const f=await fixture(t);
   await f.dbRun("INSERT INTO items(id,name,market_hash_name,price,rarity) VALUES(3,'AK boundary','AK boundary',10000,'RARE'),(4,'AK above','AK above',10000.01,'RARE'),(5,'AK below','AK below',9999.99,'RARE')");

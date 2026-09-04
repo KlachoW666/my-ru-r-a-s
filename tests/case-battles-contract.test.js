@@ -40,6 +40,8 @@ const { makeBattlesService } = require('../services/battles');
  * AC-2: compiled store loads waiting/running/finished; duplicates survive.
  * AC-3: missing catalog/failed writes never become fake success.
  * AC-4: client preserves slots and rejects empty mutation responses.
+ * AC-5: creator-slot failures roll back the room; only its creator adds bots.
+ * AC-6: one successful last-slot join; add-bot reloads persisted results.
  */
 const asset = name => fs.readFileSync(path.join(__dirname, '../public/assets/js', name), 'utf8');
 function client(request) {
@@ -187,4 +189,57 @@ test('client accepts the actual add-bot response',async()=>{
   const result=await client(async()=>({data:{success:true,battle:{participants:[{userId:'bot-1-1',isBot:true}]}}})).addBot('uid');
   assert.equal(result.status,'success');
   assert.equal(result.data.botUserId,'bot-1-1');
+});
+test('failed creator insertion rolls back the new battle',async t=>{
+  const {service,query}=await fixture(t);
+  await query("CREATE TRIGGER reject_creator BEFORE INSERT ON battle_players BEGIN SELECT RAISE(ABORT,'test failure'); END");
+  const result=await service.create({user:{id:3,username:'Third'},caseSlugs:['ak'],rounds:1,maxPlayers:2,price:399});
+  assert.equal(result,null);
+  assert.equal((await query('SELECT COUNT(*) AS n FROM battles'))[0].n,1);
+});
+for(const table of ['battles','battle_players']) {
+  test('ignored insertion into '+table+' cannot create a phantom battle',async t=>{
+    const {service,query}=await fixture(t);
+    await query(`CREATE TRIGGER ignore_insert BEFORE INSERT ON ${table} BEGIN SELECT RAISE(IGNORE); END`);
+    const result=await service.create({user:{id:3,username:'Third'},caseSlugs:['ak'],rounds:1,maxPlayers:2,price:399});
+    assert.equal(result,null);
+    assert.equal((await query('SELECT COUNT(*) AS n FROM battles'))[0].n,1);
+    assert.equal((await query('SELECT COUNT(*) AS n FROM battle_players'))[0].n,1);
+  });
+}
+test('concurrent joins admit only one player to the last slot',async t=>{
+  const {service,query,uid}=await fixture(t);
+  const results=await Promise.all([2,3].map(id=>service.join({uid,user:{id,username:'Player '+id}})));
+  assert.equal(results.filter(r=>r.ok).length,1);
+  assert.equal((await query('SELECT COUNT(*) AS n FROM battle_players'))[0].n,2);
+});
+for(const user of [{id:0,isGuest:true},{id:1,isGuest:true},{id:2}]) {
+  test('bot access rejects '+JSON.stringify(user),async t=>{
+    const {service,query,uid}=await fixture(t);
+    assert.equal((await service.join({uid,user,asBot:true,viewerId:1})).error,'FORBIDDEN');
+    assert.equal((await query('SELECT COUNT(*) AS n FROM battle_players'))[0].n,1);
+  });
+}
+for(const response of [{data:[]},{data:{success:false,battle:{participants:[{userId:'bot',isBot:true}]}}},{data:{success:true,battle:{participants:[]}}}]) {
+  test('client rejects invalid add-bot response '+JSON.stringify(response),async()=>{
+    assert.equal((await client(async()=>response).addBot('uid')).status,'error');
+  });
+}
+test('compiled add-bot refreshes the persisted match immediately',async t=>{
+  const {service,uid}=await fixture(t);
+  const store=gameStore(client(async()=>({data:{battle:await service.getByUid(uid,{withDrops:true})}})));
+  await store.loadGame(uid);
+  const source=asset('BattleGamePage-6ZhqY5fR.js');
+  const handler=source.slice(source.indexOf('addBot:async function(){')+7,source.indexOf(',goToLobby:function()'));
+  const addBot=vm.runInNewContext('('+handler+')',{
+    e:{get game(){return store.game.value;},loadGame:store.loadGame},
+    U:client(async()=>{
+      const joined=await service.join({uid,user:{id:1},asBot:true});
+      await service.play(joined.battleDbId);
+      return {data:{success:true,battle:await service.getByUid(uid,{withDrops:true})}};
+    }),W:{Success:'success'}
+  });
+  await addBot();
+  assert.equal(store.game.value.status,'RESOLVED');
+  assert.equal(store.game.value.participants[1].isBot,true);
 });

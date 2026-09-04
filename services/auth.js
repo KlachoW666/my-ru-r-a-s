@@ -328,12 +328,25 @@ async function getUserById(id) {
 /** Форма профиля, которую ждёт фронт от GET /api/v1/user. */
 function toPublicUser(row) {
   if (!row) return null;
+  const id = String(row.userId ?? row.id ?? '');
+  const steamId = row.steam_id ?? row.steamId ?? null;
+  const displayName = row.displayName || row.username || row.name || 'Player';
+  const tradeUrl = row.trade_url ?? row.trade_link ?? row.tradeUrl ?? row.tradeLink ?? null;
+  const email = row.email || null;
+  const linkedProviders = Array.isArray(row.linkedProviders)
+    ? [...new Set(row.linkedProviders)]
+    : [steamId ? 'steam' : null, email ? 'email' : null].filter(Boolean);
   const avatar = row.avatar || '/avatars/fef49e7fa7e1997310d705b2a6158ff8dc1cdfeb_medium.jpg';
   return {
-    id: String(row.id),
-    steamId: row.steam_id || null,
-    username: row.username || 'Player',
-    name: row.username || 'Player',
+    // The current compiled store consumes these names. Keep the legacy names
+    // below because older chunks and the admin adapter still read them.
+    userId: id,
+    publicId: String(row.publicId ?? id),
+    displayName,
+    id,
+    steamId,
+    username: displayName,
+    name: displayName,
     avatar,
     avatarFull: row.avatar_full || avatar,
     profileUrl: row.profile_url || null,
@@ -341,7 +354,17 @@ function toPublicUser(row) {
     currency: row.currency || 'RUB',
     status: row.status || 'active',
     role: row.role || 'user',
-    tradeLink: row.trade_link || null,
+    isGuest: Boolean(row.isGuest),
+    email,
+    emailVerified: row.emailVerified ?? row.email_verified === 1,
+    linkedProviders,
+    tradeUrl,
+    tradeLink: tradeUrl,
+    hiddenFromPublicTops: Boolean(row.hiddenFromPublicTops ?? row.hidden_from_public_tops),
+    wagerRemaining: Number(row.wagerRemaining ?? row.wager_remaining ?? 0),
+    depositBlocked: Boolean(row.depositBlocked ?? row.deposit_blocked),
+    withdrawBlocked: Boolean(row.withdrawBlocked ?? row.withdraw_blocked),
+    betBlocked: Boolean(row.betBlocked ?? row.bet_blocked),
     isUserAdmin: row.role === 'admin' || row.role === 'SUPER_ADMIN',
     canAccessStreamerStatistics: row.role === 'admin' || row.role === 'SUPER_ADMIN',
     createdAt: row.created_at || new Date().toISOString()
@@ -505,24 +528,16 @@ function registerAuthRoutes(app, options = {}) {
  * определяет по наличию localStorage["token"], а не по этому ответу.
  */
 function guestUser() {
-  return {
+  return toPublicUser({
     id: '',
-    steamId: null,
     username: 'Гость',
-    name: 'Гость',
     avatar: '/avatars/fef49e7fa7e1997310d705b2a6158ff8dc1cdfeb_medium.jpg',
-    avatarFull: '/avatars/fef49e7fa7e1997310d705b2a6158ff8dc1cdfeb_medium.jpg',
-    profileUrl: null,
     balance: 0,
-    currency: 'RUB',
     status: 'guest',
     role: 'guest',
-    tradeLink: null,
     isGuest: true,
-    isUserAdmin: false,
-    canAccessStreamerStatistics: false,
     createdAt: new Date(0).toISOString()
-  };
+  });
 }
 
 /** Профиль по текущему запросу; в dev без токена — мок. */
@@ -533,7 +548,7 @@ async function currentUser(req, mockUser) {
     // Пользователь есть в токене, но пропал из БД — отдаём то, что в токене.
     return toPublicUser({ id: req.auth.sub, steam_id: req.auth.steamId, username: req.auth.username, role: req.auth.role });
   }
-  return ALLOW_MOCK_AUTH ? mockUser : null;
+  return ALLOW_MOCK_AUTH ? toPublicUser(mockUser) : null;
 }
 
 module.exports = {

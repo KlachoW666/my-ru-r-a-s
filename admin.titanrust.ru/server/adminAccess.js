@@ -58,6 +58,7 @@ const DOMAIN_BY_SECTION = {
 
   // Математика выплат — отдельно от денег: здесь задаётся отдача площадки
   rtp: 'economy',
+  'upgrade-battles': 'economy',
 
   // Безопасность
   guardian: 'security',

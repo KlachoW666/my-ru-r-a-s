@@ -37,10 +37,9 @@ function register({app,DB_PATH,requireAdminJWT}) {
       const db=connection(DB_PATH);
       try {
         await ensureColumns(db, 'series');
-        const columns = new Set((await db.all('PRAGMA table_info(items)')).map(c=>c.name));
-        for (const [name,type] of [['delisted','INTEGER DEFAULT 0'],['admin_disabled','INTEGER DEFAULT 0'],['rarity_color','TEXT'],['classid','TEXT']]) {
-          if(!columns.has(name))await db.run(`ALTER TABLE items ADD COLUMN ${name} ${type}`);
-        }
+        await ensureColumns(db, 'cases');
+        await ensureColumns(db, 'case_items');
+        await ensureColumns(db, 'items');
         await db.run('CREATE TABLE IF NOT EXISTS content_page_types (type TEXT PRIMARY KEY)');
         await db.run(`CREATE TABLE IF NOT EXISTS content_page_meta (page_id INTEGER PRIMARY KEY, version INTEGER NOT NULL DEFAULT 1, locale TEXT NOT NULL DEFAULT 'ru', updated_by TEXT, updated_at TEXT DEFAULT CURRENT_TIMESTAMP)`);
       } finally {await db.close();}

@@ -10,6 +10,22 @@ const columns = {
   series: {
     sortOrder: 'INTEGER DEFAULT 0', description: 'TEXT', image: 'TEXT',
     titleImage: 'TEXT', isLimited: 'INTEGER DEFAULT 0', isSecret: 'INTEGER DEFAULT 0'
+  },
+  cases: {
+    image: 'TEXT', volatility: "TEXT DEFAULT 'AVERAGE'", sortOrder: 'INTEGER DEFAULT 0',
+    isBlogger: 'INTEGER DEFAULT 0', exclusiveTo: 'TEXT', seriesId: 'INTEGER',
+    status: "TEXT DEFAULT 'active'", isActive: 'INTEGER DEFAULT 1',
+    archived: 'INTEGER DEFAULT 0', category: 'TEXT'
+  },
+  case_items: {
+    chance: 'REAL DEFAULT 0', ticketRangeFrom: 'INTEGER DEFAULT 0',
+    ticketRangeTo: 'INTEGER DEFAULT 0'
+  },
+  items: {
+    chance: 'REAL DEFAULT 0', ticketRangeFrom: 'INTEGER DEFAULT 0',
+    ticketRangeTo: 'INTEGER DEFAULT 0', upgraderEnabled: 'INTEGER DEFAULT 0',
+    delisted: 'INTEGER DEFAULT 0', admin_disabled: 'INTEGER DEFAULT 0',
+    rarity_color: 'TEXT', classid: 'TEXT'
   }
 };
 

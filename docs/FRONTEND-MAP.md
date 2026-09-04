@@ -42,6 +42,7 @@ ls public/assets/css/ | grep -i profile
 | `/crate-pvp` | `crate-pvp` | `BattleLobbyPage-*.js` |
 | `/crate-pvp/create` | `crate-pvp-create` | `BattleCreatePage-*.js` |
 | `/crate-pvp/:uid` | `crate-pvp-battle` | `BattleGamePage-*.js` |
+| `/crate-pvp?mode=upgrade` | `crate-pvp` | исходный лобби-чанк + `upgrade-battle-page.js` |
 | `/upgrader` | `upgrader` | `index-*.js` (upgrader) |
 | `/giveaway`, `/giveaway/create`, `/giveaway/history` | `giveaway*` | `giveaway-*.js`, `giveaway-create-*.js`, `giveaway-layout-*.js` |
 | `/profile` | `user-profile` | `ProfilePage-*.js` |
@@ -68,7 +69,8 @@ grep -oh 'path:"[^"]*",name:"[^"]*"' public/assets/js/*.js | sort -u
 |---|---|---|
 | axios-клиент | `public/assets/js/mutator-*.js` | `baseURL:"/api/v1"`, timeout 15 с, `withCredentials:true`, Bearer из `localStorage["token"]`, refresh-очередь на `navigator.locks("kaban.auth-refresh")`. **Возвращает `response.data`, а не объект axios** |
 | auth-стор | `public/assets/js/store-DveOaq2e.js` | `refreshSession()`, `logout()`, `handleSteamCallback()`, `finalizeOAuthReturn()` |
-| user-стор | `public/assets/js/store-CliSAPz5.js` | `/user`, `/user/stats`, `/user/ban-status`, trade-link |
+| user-стор | `public/assets/js/store-CliSAPz5.js` | `/user`, `/user/stats`, `/history`, `/user/ban-status`, trade-link. Важно: ждёт `userId/displayName/tradeUrl` и `totalCases/totalUpgrades/totalBattles` |
+| батлы на апгрейдах | `public/assets/js/upgrade-battle-page.js` | лобби, поиск целей, создание, вход, возврат, восстановление по `uid` |
 | WebSocket | `public/assets/js/index-CBN0naXL.js` | синглтон-клиент, реконнект, ключ токена `"token"`, адрес WS вычисляется из `window.location` |
 | Редкости | `public/assets/js/rarity-DBZTLmta.js` | `{REGULAR,UNUSUAL,RARE,VIOLET,GOLD} → hex` |
 | i18n | `public/assets/js/en-*.js`, `tr-*.js` | ru — в основном бандле. Локаль из `localStorage`, отдельных URL под язык нет |
