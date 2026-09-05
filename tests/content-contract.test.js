@@ -286,3 +286,34 @@ test('AC17 catalogue does not silently discard a custom item price',async t=>{
   const f=await fixture(t),r=await f.request('POST','/cases/from-catalog',{name:'Custom',slug:'custom',price:50,items:[{catalogItemId:1,customPrice:999,chance:100}]});
   assert.equal(r.status,400);assert.equal(await f.dbGet("SELECT id FROM cases WHERE slug='custom'"),undefined);
 });
+
+test('AC18 editing a limited case does not call the unavailable supply endpoint',()=>{
+  const s=fs.readFileSync(path.resolve(__dirname,'../admin.titanrust.ru/public/assets/CaseFormModal.vue_vue_type_script_setup_true_lang-84FjkQIS.js'),'utf8');
+  const start=s.indexOf('async function Kt()'),end=s.indexOf('return(t,e)=>',start);
+  assert.ok(start>=0&&end>start,'case submit function must be present in the compiled bundle');
+  assert.ok(!s.slice(start,end).includes('Ht.mutateAsync'),
+    'ordinary case save must not call the intentionally unsupported limited-supply API');
+});
+
+/*
+ * Собранные чанки правятся вручную — исходников Vue в репозитории нет. В
+ * минифицированном файле всё лежит одной строкой, поэтому автоподстановка
+ * точки с запятой не спасает: `_.warning("…")const n=…` — синтаксическая
+ * ошибка, чанк перестаёт разбираться целиком, и форма кейса не открывается.
+ * Ровно так и произошло с правкой про тираж. Разбор проверяется отдельно,
+ * потому что проверка «нужный вызов удалён» такую поломку не замечает.
+ */
+test('AC19 вручную правленые чанки админки разбираются', () => {
+  const chunks = [
+    'CaseFormModal.vue_vue_type_script_setup_true_lang-84FjkQIS.js',
+    'index-D4siiPNB.js',
+    'BattlesListPage-C95vn4AY.js'
+  ];
+  for (const chunk of chunks) {
+    const source = path.resolve(__dirname, '../admin.titanrust.ru/public/assets', chunk);
+    const copy = path.join(fs.mkdtempSync(path.join(os.tmpdir(), 'chunk-')), 'chunk.mjs');
+    fs.copyFileSync(source, copy);
+    const check = require('node:child_process').spawnSync(process.execPath, ['--check', copy], {encoding: 'utf8'});
+    assert.equal(check.status, 0, `${chunk} не разбирается: ${String(check.stderr).split('\n').find(l => /Error/.test(l)) || ''}`);
+  }
+});
