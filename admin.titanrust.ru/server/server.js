@@ -58,6 +58,9 @@ app.use(cors({
   credentials: true
 }));
 app.use(express.json({ limit: '10mb' }));
+// Ошибка парсинга возникает до маршрутов. Без отдельного обработчика Express
+// отдаёт HTML, и админка заменяет его бесполезным «Server error».
+app.use(require('./jsonError').jsonErrorHandler());
 
 /*
  * Форма ошибки для фронта админки.
@@ -550,6 +553,7 @@ async function getFullCasesList(whereClause = '', params = []) {
             FROM case_items ci
             JOIN items i ON ci.item_id = i.id
             WHERE ci.case_id = ?
+            ORDER BY CAST(i.price AS REAL) DESC, i.id ASC
         `, [c.id]);
         
         c.items = caseItems.map(ci => ({
@@ -1045,6 +1049,7 @@ app.get('/api/v1/admin/rtp/cases/:caseId/tier/:tierId', requireAdminJWT, async (
             FROM case_items ci
             JOIN items i ON ci.item_id = i.id
             WHERE ci.case_id = ?
+            ORDER BY CAST(i.price AS REAL) DESC, i.id ASC
         `, [caseId]);
         res.json({ success: true, data: caseItems });
     } catch (e) {
