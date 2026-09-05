@@ -424,10 +424,16 @@ function warnEmptyCatalog() {
 
 // Get live series / categories from Admin DB with non-empty cases filtering
 async function getLiveSeries() {
+  const { exclusiveTo = null } = arguments[0] || {};
   const dbSeries = await queryAdminDb(`SELECT * FROM series WHERE status = 'active' ORDER BY id ASC`);
+  const exclusiveValue = exclusiveTo ? String(exclusiveTo).trim().toUpperCase() : null;
+  const exclusiveFilter = exclusiveValue
+    ? `AND UPPER(TRIM(COALESCE(c.exclusiveTo, ''))) = ?`
+    : `AND UPPER(TRIM(COALESCE(c.exclusiveTo, ''))) <> 'DEPOSIT_CHAIN'`;
   const dbCases = await queryAdminDb(`SELECT c.* FROM cases c LEFT JOIN series s ON s.id=c.seriesId
     WHERE c.archived = 0 AND c.isActive = 1 AND c.status = 'active'
-      AND (c.seriesId IS NULL OR s.status = 'active') ORDER BY c.sortOrder ASC`);
+      AND (c.seriesId IS NULL OR s.status = 'active')
+      ${exclusiveFilter} ORDER BY c.sortOrder ASC`, exclusiveValue ? [exclusiveValue] : []);
   const items = await getLiveItems();
 
   /*
@@ -528,7 +534,7 @@ async function getLiveSeries() {
   }
 
   // A successful empty result must not resurrect demo cases.
-  if (seriesList.length === 0 && dbCases.failed) {
+  if (seriesList.length === 0 && dbCases.failed && !exclusiveValue) {
     return [
       {
         id: 1,
@@ -572,8 +578,8 @@ async function getLiveSeries() {
 }
 
 // Get all live cases flat list
-async function getLiveCases() {
-  const series = await getLiveSeries();
+async function getLiveCases(options = {}) {
+  const series = await getLiveSeries(options);
   const cases = series.flatMap(s => s.cases);
   
   // Deduplicate by slug
@@ -1134,6 +1140,7 @@ async function getCaseItemsFromDb(caseId) {
       FROM case_items ci
       JOIN items i ON ci.item_id = i.id
       WHERE ci.case_id = ?
+      ORDER BY CAST(i.price AS REAL) DESC, i.id ASC
     `, [caseId]);
 
     if (rows && rows.length > 0) {
@@ -1198,6 +1205,12 @@ app.post(['/api/v1/cases/open', '/api/v1/cases/:slug/open'], async (req, res) =>
     const dbCases = await queryAdminDb(`SELECT * FROM cases WHERE slug = ? OR id = ?`, [slug, slug]);
     const c = dbCases[0];
     if (!c) return res.status(404).json({status:'error',code:'CASE_NOT_FOUND',message:'Кейс не найден'});
+    if (String(c.exclusiveTo || '').trim().toUpperCase() === 'DEPOSIT_CHAIN') {
+      return res.status(409).json({
+        status:'error', code:'CASE_EXCLUSIVE',
+        message:'Этот кейс открывается только через депозитную лестницу'
+      });
+    }
     const series = c.seriesId ? (await queryAdminDb('SELECT status FROM series WHERE id=?',[c.seriesId]))[0] : null;
     if (c.isActive === 0 || c.status !== 'active' || (c.seriesId && series?.status !== 'active')) {
       return res.status(409).json({status:'error',code:'CASE_INACTIVE',message:'Кейс или его серия деактивированы'});
@@ -1726,7 +1739,7 @@ async function depositTiersConfig() {
 
 /** Какие тиры игрок уже забрал. Ключ — id пользователя. */
 
-const TIER_FALLBACK_IMAGE = '/uploads/cases/1786522990114-495918520.webp';
+const TIER_FALLBACK_IMAGE = '/assets/webp/hog-deposit-chain-DT3_KEMl.webp';
 
 /** Есть ли файл картинки на диске: в базе встречаются ссылки на удалённые загрузки. */
 function imageOnDisk(img) {
@@ -1759,27 +1772,19 @@ function tierLinkedCase(tier, cases) {
 }
 
 /**
- * Кейс тира для показа: явная привязка, иначе любой по порядку.
- *
- * Годится ТОЛЬКО для названия и картинки. Для caseSlug использовать нельзя —
- * см. tierLinkedCase.
+ * Кейс тира для показа — только явно сохранённая привязка.
+ * Пустую настройку нельзя маскировать обычным кейсом из каталога.
  */
-function tierCase(tier, idx, cases) {
-  return tierLinkedCase(tier, cases) || cases[idx % Math.max(cases.length, 1)] || null;
+function tierCase(tier, _idx, cases) {
+  return tierLinkedCase(tier, cases);
 }
 
 function tierImage(tier, idx, cases) {
   // Приоритет: картинка, заданная в настройке тира -> картинка привязанного
-  // кейса -> любой кейс с живой картинкой -> общий запасной файл.
+  // кейса -> общий запасной файл. Чужие кейсы не подставляем.
   if (imageOnDisk(tier && tier.image)) return tier.image;
   const c = tierCase(tier, idx, cases);
   if (c && imageOnDisk(c.image)) return c.image;
-  // Разные тиры не должны выглядеть одинаково: ищем первый неиспользованный
-  // кейс с существующей картинкой, начиная со своего индекса.
-  for (let i = 0; i < cases.length; i++) {
-    const alt = cases[(idx + i) % cases.length];
-    if (alt && imageOnDisk(alt.image)) return alt.image;
-  }
   return TIER_FALLBACK_IMAGE;
 }
 
@@ -1799,7 +1804,7 @@ async function buildDepositTiers(req, mockUser) {
     collected = rows.length ? Number(rows[0].s) || 0 : 0;
   }
 
-  const cases = await getLiveCases();
+  const cases = await getLiveCases({ exclusiveTo: 'DEPOSIT_CHAIN' });
 
   const { variant, tiers: TIERS } = await depositTiersConfig();
   const tiers = TIERS.map((t, idx) => {
@@ -1890,7 +1895,7 @@ app.post('/api/v1/deposit-chain/open', async (req, res) => {
   }
 
   // Разыгрываем содержимое по тем же правилам, что и обычный кейс.
-  const cases = await getLiveCases();
+  const cases = await getLiveCases({ exclusiveTo: 'DEPOSIT_CHAIN' });
   const src = tierLinkedCase({ caseRef: tier.caseSlug }, cases);
   if (!src) {
     return res.status(503).json({

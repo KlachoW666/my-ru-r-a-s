@@ -158,6 +158,13 @@ test('AC2 case filters respect inactive status',async t=>{
   const f=await fixture(t),r=await f.request('GET','/cases?status=inactive');
   assert.deepEqual(r.body.data.map(x=>x.id),[2]);assert.equal(r.body.pagination.total,1);
 });
+test('case contents are returned from highest price to lowest',async t=>{
+  const f=await fixture(t);
+  await f.dbRun('INSERT INTO case_items(case_id,item_id,chance) VALUES(1,2,0)');
+  const r=await f.request('GET','/cases?status=active');
+  assert.equal(r.status,200,JSON.stringify(r.body));
+  assert.deepEqual(r.body.data[0].items.map(item=>item.id),[2,1]);
+});
 test('AC2 deactivate preserves composition for reactivation',async t=>{
   const f=await fixture(t);await f.request('DELETE','/cases/1');
   assert.equal((await f.dbGet('SELECT COUNT(*) n FROM case_items WHERE case_id=1')).n,1);
@@ -237,6 +244,15 @@ test('AC7 site catalog hides cases belonging to inactive series',async t=>{
   const live=vm.runInNewContext(s.slice(a,b)+'\ngetLiveSeries;',{queryAdminDb:f.dbAll,getLiveItems:async()=>[],fixImageUrl:x=>x});
   assert.equal((await live()).length,0);
 });
+test('AC7 deposit-chain cases are hidden from the public catalogue',async t=>{
+  const f=await fixture(t);await f.dbRun("UPDATE cases SET exclusiveTo='DEPOSIT_CHAIN' WHERE id=1");
+  const s=fs.readFileSync(path.resolve(__dirname,'../server.js'),'utf8');
+  const a=s.indexOf('async function getLiveSeries('),b=s.indexOf('// Get all live cases flat list',a);
+  const live=vm.runInNewContext(s.slice(a,b)+'\ngetLiveSeries;',{queryAdminDb:f.dbAll,getLiveItems:async()=>[],fixImageUrl:x=>x});
+  assert.deepEqual(JSON.parse(JSON.stringify(await live())),[]);
+  const ladder=JSON.parse(JSON.stringify(await live({exclusiveTo:'DEPOSIT_CHAIN'})));
+  assert.deepEqual(ladder.flatMap(series=>series.cases).map(c=>c.slug),['active']);
+});
 test('AC7 disabled case cannot reach wallet debit',async t=>{
   const f=await fixture(t),app=express();app.use(express.json());
   const s=fs.readFileSync(path.resolve(__dirname,'../server.js'),'utf8');
@@ -246,6 +262,18 @@ test('AC7 disabled case cannot reach wallet debit',async t=>{
   const server=app.listen(0,'127.0.0.1');await new Promise(r=>server.once('listening',r));t.after(()=>new Promise(r=>server.close(r)));
   const r=await fetch(`http://127.0.0.1:${server.address().port}/api/v1/cases/inactive/open`,{method:'POST',headers:{'Content-Type':'application/json'},body:'{}'});
   assert.equal(r.status,409);assert.equal(touched,false);
+});
+test('AC7 deposit-chain case cannot be opened through the paid case endpoint',async t=>{
+  const f=await fixture(t);await f.dbRun("UPDATE cases SET exclusiveTo='DEPOSIT_CHAIN' WHERE id=1");
+  const app=express();app.use(express.json());
+  const s=fs.readFileSync(path.resolve(__dirname,'../server.js'),'utf8');
+  const a=s.indexOf("app.post(['/api/v1/cases/open'");const b=s.indexOf('// --- MOCK & ADMIN SYNCHRONIZED API ROUTES ---',a);
+  let touched=false;
+  vm.runInNewContext(s.slice(a,b),{app,queryAdminDb:f.dbAll,console,mockUser:{},currentUser:async()=>{touched=true;throw Error('Wallet must not be touched')}});
+  const server=app.listen(0,'127.0.0.1');await new Promise(r=>server.once('listening',r));t.after(()=>new Promise(r=>server.close(r)));
+  const r=await fetch(`http://127.0.0.1:${server.address().port}/api/v1/cases/active/open`,{method:'POST',headers:{'Content-Type':'application/json'},body:'{}'});
+  const body=await r.json();
+  assert.equal(r.status,409);assert.equal(body.code,'CASE_EXCLUSIVE');assert.equal(touched,false);
 });
 test('AC8 public catalogue respects upgraderEnabled',async t=>{
   const f=await fixture(t),s=fs.readFileSync(path.resolve(__dirname,'../services/steamCatalog.js'),'utf8');

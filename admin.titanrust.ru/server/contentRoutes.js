@@ -163,7 +163,7 @@ function register({app,DB_PATH,requireAdminJWT}) {
   });
 
   async function fullCase(db,row){
-    const items=await db.all(`SELECT i.*, ci.chance,ci.ticketRangeFrom,ci.ticketRangeTo FROM case_items ci JOIN items i ON i.id=ci.item_id WHERE ci.case_id=? ORDER BY ci.id`,[row.id]);
+    const items=await db.all(`SELECT i.*, ci.chance,ci.ticketRangeFrom,ci.ticketRangeTo FROM case_items ci JOIN items i ON i.id=ci.item_id WHERE ci.case_id=? ORDER BY CAST(i.price AS REAL) DESC, i.id ASC`,[row.id]);
     const series=row.seriesId?await db.get('SELECT name FROM series WHERE id=?',[row.seriesId]):null;
     return {...row,isActive:!!row.isActive,archived:!!row.archived,isBlogger:!!row.isBlogger,seriesName:series?.name||null,items:items.map(itemDto),itemIds:items.map(i=>i.id)};
   }

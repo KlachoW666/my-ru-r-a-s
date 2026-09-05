@@ -135,14 +135,15 @@ test('AC3 PUT persists the complete ladder matrix', async t => {
   assert.equal(saved.caseRefs[14].caseRef, 'deposit-case');
 });
 
-test('AC4 tier case resolution reads an explicit caseRef', () => {
+test('AC4 tier case resolution reads an explicit caseRef and never substitutes another case', () => {
   const source = fs.readFileSync(path.resolve(__dirname, '../server.js'), 'utf8');
   const start = source.indexOf('function tierLinkedCase(');
-  const end = source.indexOf('/**\n * Кейс тира для показа', start);
-  const tierLinkedCase = vm.runInNewContext(`${source.slice(start, end)}\ntierLinkedCase;`);
+  const end = source.indexOf('\nfunction tierImage(', start);
+  const helpers = vm.runInNewContext(`${source.slice(start, end)}\n({tierLinkedCase,tierCase});`);
   const cases = [{ id: 1, slug: 'ordinary' }, { id: 2, slug: 'deposit-case' }];
-  assert.equal(tierLinkedCase({ caseRef: 'deposit-case' }, cases).slug, 'deposit-case');
-  assert.equal(tierLinkedCase({}, cases), null);
+  assert.equal(helpers.tierLinkedCase({ caseRef: 'deposit-case' }, cases).slug, 'deposit-case');
+  assert.equal(helpers.tierLinkedCase({}, cases), null);
+  assert.equal(helpers.tierCase({}, 0, cases), null);
 });
 
 test('AC5 selected matrix group is merged into player tiers', () => {
