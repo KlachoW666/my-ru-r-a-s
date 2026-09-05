@@ -44,6 +44,8 @@ Test Cases to Cover:
 - [unit] AC4 Case resolution accepts caseRef and never falls back to an unrelated ordinary case.
 - [unit] AC5 The selected B/C/D matrix row is merged into the five player tiers.
 - [integration] AC6 A free first tier is valid, while thresholds must remain strictly increasing.
+- [unit] AC7 The compiled save action accepts a zero threshold for tier 0.
+- [unit] AC8 A rejected confirmation closes before showing the validation error.
 */
 
 async function fixture(t) {
@@ -168,4 +170,47 @@ test('AC6 first threshold may be zero but thresholds must increase', async t => 
   const response = await request('PUT', '/config/deposit-chain', reversed);
   assert.equal(response.status, 400);
   assert.match(response.body.message, /возрастать/);
+});
+
+function compiledDepositChainSave(overrides = {}) {
+  const source = fs.readFileSync(path.resolve(__dirname, '../admin.titanrust.ru/public/assets/DepositChainConfigPage-Bn4BxJsx.js'), 'utf8');
+  const start = source.indexOf('async function ae(){');
+  const end = source.indexOf('return(s,e)=>', start);
+  assert.ok(start >= 0 && end > start, 'compiled deposit-chain save action must exist');
+  const calls = [];
+  const errors = [];
+  const groups = ['B', 'C', 'D'];
+  const tiers = [0, 1, 2, 3, 4];
+  const refs = Object.fromEntries(groups.flatMap(group => tiers.map(tier => [`${group}:${tier}`, 'deposit-case'])));
+  const context = {
+    h: tiers,
+    p: { value: { 0: '0', 1: '174', 2: '384', 3: '821', 4: '1166' } },
+    T: groups,
+    r: { value: refs },
+    g: (group, tier) => `${group}:${tier}`,
+    A: { value: false },
+    G: { value: true },
+    v: { error: message => errors.push(String(message)), success() {} },
+    Se: { mutateAsync: async payload => { calls.push(payload); return { data: payload.data }; } },
+    E: { value: new Set() },
+    B: { setQueryData() {} },
+    Je: () => ['deposit-chain'],
+    ...overrides
+  };
+  return { save: vm.runInNewContext(`${source.slice(start, end)}\nae;`, context), context, calls, errors };
+}
+
+test('AC7 compiled save accepts a free first tier', async () => {
+  const subject = compiledDepositChainSave();
+  await subject.save();
+  assert.equal(subject.errors.length, 0);
+  assert.equal(subject.calls.length, 1);
+  assert.equal(subject.calls[0].data.tiers[0].threshold, '0');
+});
+
+test('AC8 invalid confirmation closes before reporting its error', async () => {
+  const subject = compiledDepositChainSave({ r: { value: {} } });
+  await subject.save();
+  assert.equal(subject.context.G.value, false);
+  assert.match(subject.errors[0], /Не выбран кейс для группы B, тир 0/);
 });

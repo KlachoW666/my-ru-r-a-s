@@ -337,3 +337,13 @@ test('AC19 вручную правленые чанки админки разб�
     assert.equal(check.status, 0, `${chunk} не разбирается: ${String(check.stderr).split('\n').find(l => /Error/.test(l)) || ''}`);
   }
 });
+
+test('AC20 выбор серии использует один строковый тип идентификатора', () => {
+  const s=fs.readFileSync(path.resolve(__dirname,'../admin.titanrust.ru/public/assets/CaseFormModal.vue_vue_type_script_setup_true_lang-84FjkQIS.js'),'utf8');
+  assert.ok(s.includes('value:String(a.id)'),
+    'значение пункта серии должно совпадать со строковым model-value компонента Select');
+  assert.ok(s.includes('String(t.id)===String(R.value)'),
+    'выбранная серия должна находиться независимо от числового типа id в API');
+  assert.ok(s.includes('R.value=u.editingCase.seriesId==null?"":String(u.editingCase.seriesId)'),
+    'при редактировании seriesId должен нормализоваться до типа Select');
+});
