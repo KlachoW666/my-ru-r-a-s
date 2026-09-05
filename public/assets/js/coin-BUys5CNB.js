@@ -1,1 +1,2 @@
-const s="/assets/png/coin-CXMSpQjd.png";export{s as c};
+/* Единый растровый источник валюты: медвежья лапа. */
+const s="/image/icon-money.png";export{s as c};

@@ -193,6 +193,68 @@
   --sat-dur-ignite: 900ms;
 }
 
+/* -------------------------------------------------------------------------
+ * Медвежьи подложки, LIVE-лента и валюта.
+ * Разметка ленты уже совпадает с рабочим responsive-контрактом: горизонтальная
+ * полоса 768–1535 px и липкая колонка от 1536 px. Здесь оставлены только
+ * брендовые замены, чтобы не дублировать scoped CSS собранного компонента.
+ * ---------------------------------------------------------------------- */
+.hog-shamp img[src*="hog-shamp"] {
+  width: 100%;
+  height: 100%;
+  object-fit: contain;
+  content: url('/image/icon-logo.png');
+  opacity: 0.2;
+}
+
+.live-drop-panel .hog-shamp {
+  width: 76px;
+  height: 76px;
+  opacity: 0.18;
+  filter: saturate(0.82) brightness(0.9);
+}
+
+.live-drop-panel .hog-shamp img {
+  inset: 0;
+  width: 100%;
+  height: 100%;
+  object-fit: contain;
+  content: url('/image/icon-logo.png');
+  opacity: 1;
+}
+
+.live-drop-panel .item-card:hover .hog-shamp,
+.live-drop-panel .item-card:focus-visible .hog-shamp {
+  opacity: 0.1;
+  filter: blur(2px) saturate(0.72) brightness(0.88);
+}
+
+.live-drop-panel .money-icon {
+  width: 14px;
+  height: 14px;
+  flex-basis: 14px;
+  background: url('/image/icon-money.png') center / contain no-repeat;
+}
+
+.live-drop-panel .money-icon::before,
+.live-drop-panel .money-icon::after {
+  display: none;
+}
+
+/* В Currency-компоненте gray-вариант всё ещё содержит старый встроенный PNG.
+ * content заменяет и его, поэтому на всех страницах остаётся одна лапа. */
+.currency-root .hog-coin {
+  content: url('/image/icon-money.png');
+}
+
+/* Шапка использует прямые растровый/SVG-пути и не всегда проходит через
+ * logo-full из карты иконок. Подменяем оба варианта единым знаком медведя. */
+.header-wordmark img,
+.header-logo-img {
+  content: url('/image/icon-logo.png');
+  object-fit: contain;
+}
+
 /* Загрузочный спиннер живёт в index.html до монтирования Vue, поэтому
    переменных там ещё нет и цвет прописан значением. Дублируем на случай,
    если стиль всё же успел примениться. */
@@ -280,7 +342,7 @@
     display: flex;
     align-items: center;
     gap: 6px;
-    width: 165px;
+    width: 190px;
     height: 49px;
     flex-shrink: 0;
     color: var(--text-main);

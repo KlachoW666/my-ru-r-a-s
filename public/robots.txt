@@ -1,4 +1,4 @@
-# SATCHEL — satchel.top
+# bearup.top — bearup.top
 
 User-agent: *
 Allow: /
@@ -41,4 +41,4 @@ Disallow: /
 User-agent: DotBot
 Disallow: /
 
-Sitemap: https://satchel.top/sitemap.xml
+Sitemap: https://bearup.top/sitemap.xml
