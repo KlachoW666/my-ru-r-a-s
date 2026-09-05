@@ -197,6 +197,26 @@ test('AC5 invalid item must not leave a partially created case',async t=>{
   const f=await fixture(t),r=await f.request('POST','/cases',{name:'Broken',slug:'broken',price:50,items:[999]});
   assert.equal(r.status,400);assert.equal(await f.dbGet("SELECT id FROM cases WHERE slug='broken'"),undefined);
 });
+test('AC5 create form persists an uploaded image and twenty-one selected items',async t=>{
+  const f=await fixture(t);
+  for(let id=3;id<=21;id++)await f.dbRun(
+    'INSERT INTO items(id,market_hash_name,name,price,rarity) VALUES(?,?,?,?,?)',
+    [id,`Item ${id}`,`Item ${id}`,id*500,'GOLD']);
+  const items=Array.from({length:21},(_,index)=>({
+    id:index+1,
+    chance:100/21,
+    ticketRangeFrom:index*1000+1,
+    ticketRangeTo:(index+1)*1000
+  }));
+  const r=await f.request('POST','/cases',{
+    name:'Кейс за 9999',slug:'',image:'/uploads/cases/new-case.webp',price:9999,
+    volatility:'AVERAGE',sortOrder:1,isBlogger:false,items
+  });
+  assert.equal(r.status,200,JSON.stringify(r.body));
+  assert.match(r.body.data.slug,/^[a-z0-9-]+$/);
+  assert.equal(r.body.data.image,'/uploads/cases/new-case.webp');
+  assert.equal((await f.dbGet('SELECT COUNT(*) n FROM case_items WHERE case_id=?',[r.body.data.id])).n,21);
+});
 test('AC5 export is JSON expected by CSV download button',async t=>{
   const f=await fixture(t),r=await f.request('GET','/cases/export?status=active');
   assert.ok(Array.isArray(r.body.data));assert.equal(r.body.data[0].items[0].catalogItemName,'Alpha');

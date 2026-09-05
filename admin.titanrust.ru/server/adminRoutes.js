@@ -145,6 +145,95 @@ function makeAdminRoutes({ app, dbAll, dbGet, dbRun, requireAdminJWT }) {
     app.patch(`/api/v1/admin${path}`, requireAdminJWT, save);
   }
 
+  const DEPOSIT_TIER_NAMES = ['Камень', 'Лук', 'Двушка', 'Томпсон', 'Калаш'];
+  const DEPOSIT_GROUPS = ['B', 'C', 'D'];
+
+  function normalizeDepositChainConfig(value = {}) {
+    const sourceTiers = Array.isArray(value.tiers) ? value.tiers : [];
+    const byIndex = new Map(sourceTiers.map((tier, index) => [Number.isInteger(Number(tier?.tierIndex)) ? Number(tier.tierIndex) : index, tier || {}]));
+    const tiers = DEPOSIT_TIER_NAMES.map((name, tierIndex) => {
+      const tier = byIndex.get(tierIndex) || {};
+      return { tierIndex, threshold: Number(tier.threshold) || 0, name: tier.name || name };
+    });
+    const seen = new Set();
+    const caseRefs = [];
+    for (const row of Array.isArray(value.caseRefs) ? value.caseRefs : []) {
+      const group = String(row?.group || '').toUpperCase();
+      const tierIndex = Number(row?.tierIndex);
+      const caseRef = String(row?.caseRef || row?.caseSlug || '').trim();
+      const key = `${group}:${tierIndex}`;
+      if (!DEPOSIT_GROUPS.includes(group) || !Number.isInteger(tierIndex) || tierIndex < 0 || tierIndex > 4 || !caseRef || seen.has(key)) continue;
+      seen.add(key);
+      caseRefs.push({ group, tierIndex, caseRef });
+    }
+    return { ...value, variant: DEPOSIT_GROUPS.includes(value.variant) ? value.variant : 'B', tiers, caseRefs };
+  }
+
+  function depositChainSettings() {
+    app.get('/api/v1/admin/config/deposit-chain', requireAdminJWT, async (_req, res) => {
+      const row = await dbGet(`SELECT value, updated_at FROM app_settings WHERE key = 'deposit_chain'`).catch(() => null);
+      let value = {};
+      try { value = row ? JSON.parse(row.value) : {}; } catch {}
+      ok(res, { ...normalizeDepositChainConfig(value), updatedAt: row?.updated_at || null, updatedBy: value.updatedBy || null });
+    });
+
+    const save = async (req, res) => {
+      const body = req.body || {};
+      const tiers = Array.isArray(body.tiers) ? body.tiers : [];
+      const caseRefs = Array.isArray(body.caseRefs) ? body.caseRefs : [];
+      const indexes = new Set(tiers.map(tier => Number(tier?.tierIndex)));
+      if (tiers.length !== 5 || indexes.size !== 5 || [...indexes].some(index => !Number.isInteger(index) || index < 0 || index > 4)) {
+        return bad(res, 'Нужны ровно пять тиров с индексами 0–4');
+      }
+      const thresholds = [...tiers]
+        .sort((a, b) => Number(a.tierIndex) - Number(b.tierIndex))
+        .map(tier => Number(tier.threshold));
+      if (thresholds.some(threshold => !Number.isFinite(threshold) || threshold < 0)) {
+        return bad(res, 'Порог каждого тира должен быть неотрицательным числом');
+      }
+      if (thresholds.some((threshold, index) => index > 0 && threshold <= thresholds[index - 1])) {
+        return bad(res, 'Пороги тиров должны строго возрастать');
+      }
+      const expectedCells = DEPOSIT_GROUPS.length * 5;
+      const cells = new Set(caseRefs.map(row => `${String(row?.group || '').toUpperCase()}:${Number(row?.tierIndex)}`));
+      if (caseRefs.length !== expectedCells || cells.size !== expectedCells || [...cells].some(cell => !/^[BCD]:[0-4]$/.test(cell))) {
+        return bad(res, 'Заполните все кейсы для групп B, C и D');
+      }
+      const slugs = [...new Set(caseRefs.map(row => String(row?.caseRef || '').trim()).filter(Boolean))];
+      const placeholders = slugs.map(() => '?').join(',');
+      const rows = slugs.length ? await dbAll(
+        `SELECT c.slug, COUNT(ci.item_id) AS item_count
+         FROM cases c LEFT JOIN case_items ci ON ci.case_id = c.id
+         LEFT JOIN items i ON i.id = ci.item_id
+         WHERE c.slug IN (${placeholders}) AND c.exclusiveTo = 'DEPOSIT_CHAIN'
+           AND c.status = 'active' AND c.isActive = 1 AND c.archived = 0
+           AND (i.id IS NULL OR (COALESCE(i.delisted,0) = 0 AND COALESCE(i.admin_disabled,0) = 0))
+         GROUP BY c.id`, slugs) : [];
+      const valid = new Set(rows.filter(row => Number(row.item_count) >= 2).map(row => row.slug));
+      const rejected = slugs.filter(slug => !valid.has(slug));
+      if (rejected.length) {
+        const message = `Кейсы должны быть активными, иметь минимум два предмета и эксклюзивность DEPOSIT_CHAIN: ${rejected.join(', ')}`;
+        return res.status(409).json({ success: false, message, error: { message } });
+      }
+      const current = normalizeDepositChainConfig(await readSetting('deposit_chain', {}));
+      const next = normalizeDepositChainConfig({
+        ...current,
+        tiers: tiers.map(tier => ({
+          tierIndex: Number(tier.tierIndex),
+          threshold: Number(tier.threshold),
+          name: current.tiers[Number(tier.tierIndex)]?.name || DEPOSIT_TIER_NAMES[Number(tier.tierIndex)]
+        })),
+        caseRefs: caseRefs.map(row => ({ group: String(row.group).toUpperCase(), tierIndex: Number(row.tierIndex), caseRef: String(row.caseRef).trim() })),
+        updatedBy: String(req.user?.username || req.user?.userId || 'admin')
+      });
+      await writeSetting('deposit_chain', next);
+      ok(res, { ...next, updatedAt: new Date().toISOString() });
+    };
+    app.put('/api/v1/admin/config/deposit-chain', requireAdminJWT, save);
+    app.post('/api/v1/admin/config/deposit-chain', requireAdminJWT, save);
+    app.patch('/api/v1/admin/config/deposit-chain', requireAdminJWT, save);
+  }
+
   /** То же, что resource(), но идентификатор строковый и генерируется клиентом. */
   function textIdResource(path, table, fields) {
     app.get(`/api/v1/admin${path}`, requireAdminJWT, async (req, res) => {
@@ -668,7 +757,7 @@ function makeAdminRoutes({ app, dbAll, dbGet, dbRun, requireAdminJWT }) {
   settings('/topdrops/config', 'topdrops');
   settings('/config/secret-cases', 'secret_cases');
   settings('/secret-cases/config', 'secret_cases');
-  settings('/config/deposit-chain', 'deposit_chain');
+  depositChainSettings();
   settings('/bots/config', 'bots_config');
   settings('/giveaways/streamer-configs', 'streamer_configs');
 
