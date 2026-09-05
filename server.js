@@ -1701,15 +1701,27 @@ const DEPOSIT_TIERS_FALLBACK = [
   { name: 'Калаш',   threshold: 1166 }
 ];
 
-async function depositTiersConfig() {
-  const cfg = await adminSetting('deposit_chain', {});
-  return Array.isArray(cfg.tiers) && cfg.tiers.length ? cfg.tiers : DEPOSIT_TIERS_FALLBACK;
+function depositTiersForVariant(config, variant) {
+  const tiers = Array.isArray(config?.tiers) && config.tiers.length
+    ? config.tiers
+    : DEPOSIT_TIERS_FALLBACK;
+  const refs = new Map((Array.isArray(config?.caseRefs) ? config.caseRefs : [])
+    .filter(row => String(row?.group || '').toUpperCase() === variant)
+    .map(row => [Number(row.tierIndex), String(row.caseRef || '').trim()]));
+  return tiers.map((tier, index) => ({
+    ...tier,
+    tierIndex: Number.isInteger(Number(tier?.tierIndex)) ? Number(tier.tierIndex) : index,
+    caseRef: refs.get(Number.isInteger(Number(tier?.tierIndex)) ? Number(tier.tierIndex) : index)
+      || tier?.caseRef || tier?.caseSlug || null
+  }));
 }
 
-/** Настройка одного тира — нужна при открытии, чтобы найти привязанный кейс. */
-async function tierConfigAt(idx) {
-  const tiers = await depositTiersConfig();
-  return tiers[idx] || null;
+async function depositTiersConfig() {
+  const config = await adminSetting('deposit_chain', {});
+  const variant = ['B', 'C', 'D'].includes(String(config.variant).toUpperCase())
+    ? String(config.variant).toUpperCase()
+    : 'B';
+  return { variant, tiers: depositTiersForVariant(config, variant) };
 }
 
 /** Какие тиры игрок уже забрал. Ключ — id пользователя. */
@@ -1741,7 +1753,7 @@ function imageOnDisk(img) {
  * обычных кейсах появлялось «Откройте предыдущий».
  */
 function tierLinkedCase(tier, cases) {
-  const slug = tier && (tier.slug || tier.caseSlug || tier.case);
+  const slug = tier && (tier.caseRef || tier.slug || tier.caseSlug || tier.case);
   if (!slug) return null;
   return cases.find(c => String(c.slug) === String(slug) || String(c.id) === String(slug)) || null;
 }
@@ -1789,7 +1801,7 @@ async function buildDepositTiers(req, mockUser) {
 
   const cases = await getLiveCases();
 
-  const TIERS = await depositTiersConfig();
+  const { variant, tiers: TIERS } = await depositTiersConfig();
   const tiers = TIERS.map((t, idx) => {
     let status;
     if (claimed.has(idx)) status = 'opened';
@@ -1826,19 +1838,19 @@ async function buildDepositTiers(req, mockUser) {
     ? readyIdx
     : Math.max(0, tiers.findIndex(t => t.status === 'collecting'));
 
-  return { user, key, claimed, collected, tiers, activeTierIndex };
+  return { user, key, claimed, collected, tiers, activeTierIndex, variant };
 }
 
 app.get(['/api/v1/deposit-chain/state', '/api/v1/deposit-chain'], async (req, res) => {
   try {
-  const { tiers, activeTierIndex, collected } = await buildDepositTiers(req, mockUser);
+  const { tiers, activeTierIndex, collected, variant } = await buildDepositTiers(req, mockUser);
   res.json({
     status: "success",
     data: {
       active: true,
       step: activeTierIndex + 1,
       showLadder: true,
-      variant: "A",
+      variant,
       completed: tiers.every(t => t.status === 'opened'),
       currency: "RUB",
       totalCollected: collected,
@@ -1879,7 +1891,13 @@ app.post('/api/v1/deposit-chain/open', async (req, res) => {
 
   // Разыгрываем содержимое по тем же правилам, что и обычный кейс.
   const cases = await getLiveCases();
-  const src = tierCase(await tierConfigAt(tierIndex), tierIndex, cases);
+  const src = tierLinkedCase({ caseRef: tier.caseSlug }, cases);
+  if (!src) {
+    return res.status(503).json({
+      status: 'error', code: 'CHAIN_UNAVAILABLE',
+      message: 'Для этой ступени не назначен активный депозитный кейс'
+    });
+  }
   // Пул берём из каталога по цене тира, а не из состава кейса: составы бывают
   // битыми, и бесплатный кейс за 0 руб выдавал предмет за 15 400 руб.
   const nominal = Math.max(tier.threshold, 50);

@@ -1302,7 +1302,16 @@ app.all('/api/v1/admin/*', requireAdminJWT, (req, res) => {
 // =====================================================
 // STATIC FILES & SPA FALLBACK
 // =====================================================
-app.use(express.static(PUBLIC_DIR));
+// The checked-in admin UI is a compiled bundle that receives targeted fixes
+// without a new Vite content hash. Never let a browser, CDN or reverse proxy
+// keep an old HTML/JS/service-worker response after deployment.
+app.use(express.static(PUBLIC_DIR, {
+    setHeaders(res, filePath) {
+        if (/\.(?:html|js|css)$/i.test(filePath) || /(?:^|[\\/])sw\.js$/i.test(filePath)) {
+            res.setHeader('Cache-Control', 'no-store, no-cache, must-revalidate');
+        }
+    }
+}));
 
 app.get('*', (req, res) => {
     if (path.extname(req.path) !== '') {
