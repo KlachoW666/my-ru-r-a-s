@@ -1,7 +1,6 @@
-<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 372 64" role="img" aria-label="SATCHEL">
-  <title>SATCHEL</title>
-  <!-- Знак + надпись. `.TOP` намеренно отсутствует: бренд — SATCHEL,
-       доменная зона живёт в адресной строке и подвале, а не в логотипе. -->
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 372 64" role="img" aria-label="bearup.top">
+  <title>bearup.top</title>
+  <!-- Знак + доменное имя нового бренда. -->
   <svg x="0" y="0" width="64" height="64" viewBox="4 6 58 54" overflow="visible">
     <rect x="11" y="26" width="42" height="29" rx="5" fill="none" stroke="#f36a21" stroke-width="4"/>
     <path d="M13 36H51" stroke="#c89b62" stroke-width="2.6" stroke-linecap="round"/>
@@ -12,5 +11,5 @@
     <polyline points="43 26 47 20 52 17" fill="none" stroke="#f36a21" stroke-width="3.2" stroke-linecap="round" stroke-linejoin="round"/>
     <circle cx="55" cy="14" r="4.2" fill="#ffb347"/>
   </svg>
-  <text x="76" y="45" font-family="Onest, 'Segoe UI', system-ui, -apple-system, sans-serif" font-size="40" font-weight="900" letter-spacing="3.5" fill="var(--sat-logo-text, #f2eee6)">SATCHEL</text>
+  <text x="76" y="45" font-family="Onest, 'Segoe UI', system-ui, -apple-system, sans-serif" font-size="40" font-weight="900" letter-spacing="1" fill="var(--sat-logo-text, #f2eee6)">bearup.top</text>
 </svg>

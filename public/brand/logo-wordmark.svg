@@ -1,7 +1,7 @@
-<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 300 64" role="img" aria-label="SATCHEL">
-  <title>SATCHEL</title>
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 300 64" role="img" aria-label="bearup.top">
+  <title>bearup.top</title>
   <!-- Надпись задана текстом, а не контурами, намеренно: обвести буквы
        автоматически и не проверить каждую — верный способ получить
        кривой wordmark. Шрифт Onest уже подключён в index.html. -->
-  <text x="0" y="46" font-family="Onest, 'Segoe UI', system-ui, -apple-system, sans-serif" font-size="44" font-weight="900" letter-spacing="4" fill="var(--sat-logo-text, #f2eee6)">SATCHEL</text>
+  <text x="0" y="46" font-family="Onest, 'Segoe UI', system-ui, -apple-system, sans-serif" font-size="44" font-weight="900" letter-spacing="1" fill="var(--sat-logo-text, #f2eee6)">bearup.top</text>
 </svg>
