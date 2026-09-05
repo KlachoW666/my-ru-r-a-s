@@ -277,3 +277,49 @@ test('AC24: role change validates authority, role and reason without modifying t
   assert.equal((await request('/users/1/role', 'PATCH', { role: 'STREAMER', reason: '' })).status, 400);
   assert.equal((await dbGet('SELECT role FROM users WHERE id=1')).role, 'user');
 });
+
+// AC25: вкладка «Ставки» показывала выплату/множитель/прибыль как «—», потому что
+// эти поля были захардкожены в null. Теперь каждая ставка связывается со своим
+// выигрышем: апгрейдер и замес — по строке *_win, кейс — по предмету inventory.
+test('AC25: bets pair payout, profit and multiplier per game', async t => {
+  const { request, dbRun } = await fixture(t);
+  await dbRun(`INSERT INTO users (id,username,role,status,balance,created_at) VALUES (3,'Carol','user','active',0,'2026-09-05 10:00:00')`);
+  await dbRun(`CREATE TABLE inventory (id INTEGER PRIMARY KEY, user_id TEXT, item_id INTEGER, name TEXT, image TEXT,
+    price REAL, source TEXT, source_ref TEXT, status TEXT, created_at TEXT)`);
+  // Кейс: ставка 300, выпал предмет на 500 (в inventory, тот же момент).
+  await dbRun(`INSERT INTO transactions VALUES (10,3,'case_open',-300,'Открытие: Кепка x1','2026-09-05 10:31:00')`);
+  await dbRun(`INSERT INTO inventory (id,user_id,item_id,name,price,source,source_ref,status,created_at)
+    VALUES (1,'3',7,'Скин',500,'case','Кепка','owned','2026-09-05 10:31:00')`);
+  // Апгрейд выигрышный: ставка 1000, выплата 2500.
+  await dbRun(`INSERT INTO transactions VALUES (11,3,'upgrade',-1000,'Апгрейд x2.50','2026-09-05 10:32:00')`);
+  await dbRun(`INSERT INTO transactions VALUES (12,3,'upgrade_win',2500,'Скин','2026-09-05 10:32:00')`);
+  // Апгрейд проигрышный: ставка 1000, выплаты нет — исход известен, это 0, а не «—».
+  await dbRun(`INSERT INTO transactions VALUES (13,3,'upgrade',-1000,'Апгрейд x3.00','2026-09-05 10:33:00')`);
+  // Замес: взнос 1198, победа 2396.
+  await dbRun(`INSERT INTO transactions VALUES (14,3,'battle_entry',-1198,'Создание замеса','2026-09-05 10:34:00')`);
+  await dbRun(`INSERT INTO transactions VALUES (15,3,'battle_win',2396,'Победа','2026-09-05 10:34:00')`);
+
+  const r = await request('/wallet/3/bets');
+  assert.equal(r.status, 200);
+  assert.equal(r.body.data.total, 4);
+  const byId = Object.fromEntries(r.body.data.items.map(i => [i.id, i]));
+  assert.deepEqual(
+    { win: byId['10'].winAmount, mult: byId['10'].multiplier, edge: byId['10'].houseEdge },
+    { win: '500.00', mult: 1.67, edge: '-200.00' });                       // кейс, прибыль игрока
+  assert.deepEqual(
+    { win: byId['11'].winAmount, mult: byId['11'].multiplier }, { win: '2500.00', mult: 2.5 }); // апгрейд-победа
+  assert.deepEqual(
+    { win: byId['13'].winAmount, mult: byId['13'].multiplier, edge: byId['13'].houseEdge },
+    { win: '0.00', mult: 0, edge: '1000.00' });                            // апгрейд-проигрыш известен
+  assert.equal(byId['14'].winAmount, '2396.00');                           // замес-победа
+});
+
+// AC26: у кейса без записи о выпавших предметах исход неизвестен — не выдумываем 0
+// (из кейса всегда что-то выпадает), показываем «—».
+test('AC26: a case with no inventory evidence stays unknown', async t => {
+  const { request } = await fixture(t);
+  const r = await request('/wallet/1/bets');           // fixture: case_open без inventory
+  assert.equal(r.body.data.items[0].winAmount, null);
+  assert.equal(r.body.data.items[0].multiplier, null);
+  assert.equal(r.body.data.items[0].houseEdge, null);
+});

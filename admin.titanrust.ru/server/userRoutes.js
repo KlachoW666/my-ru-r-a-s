@@ -167,10 +167,52 @@ function register({ app, dbAll, dbGet, dbRun, requireAdminJWT, DB_PATH,
   }
   app.get('/api/v1/admin/wallet/:id/bets',requireAdminJWT,forUser(async(req,res,row)=>{
     const types={case_open:'CASE',upgrade:'UPGRADER',battle_entry:'BATTLE'};
-    const rows=(await ledger(row.id)).filter(r=>betTypes.includes(r.type));
-    history(req,res,rows.map(r=>({id:String(r.id),type:types[r.type],betAmount:money(Math.abs(r.amount)),
-      winAmount:null,multiplier:null,houseEdge:null,isFree:false,caseName:null,
-      createdAt:iso(r.created_at),resultKnown:false,description:r.comment||'',source:'transactions'})));
+    // Выигрыш ставки лежит не в одной строке со ставкой:
+    //   апгрейдер и замес пишут отдельную строку *_win (её нет, если проиграл);
+    //   кейс кладёт выпавший предмет в inventory (source='case'), а не в транзакцию.
+    // Поэтому «Выплату», «Прибыль», «Множитель» и House Edge нужно собрать, а не
+    // выдавать «—»: каждую ставку связываем с её выигрышем.
+    const all=(await ledger(row.id)).slice().sort((a,b)=>Number(a.id)-Number(b.id));
+    const inv=await hasTable('inventory')
+      ? (await dbAll("SELECT id,price,created_at FROM inventory WHERE user_id=? AND source='case' ORDER BY id",[String(row.id)]))
+      : [];
+    const usedInv=new Set();
+
+    // Выигрыш транзакцией: строка *_win между этой ставкой и следующей такой же.
+    // Проигрыш — это отсутствие такой строки, то есть 0; исход всё равно известен.
+    function txWin(bet,winType){
+      const same=all.filter(r=>r.type===bet.type);
+      const idx=same.findIndex(r=>r.id===bet.id);
+      const next=same[idx+1] ? Number(same[idx+1].id) : Infinity;
+      return all.filter(r=>r.type===winType&&Number(r.id)>Number(bet.id)&&Number(r.id)<next&&Number(r.amount)>0)
+        .reduce((s,r)=>s+Number(r.amount),0);
+    }
+    // Выигрыш кейса лежит в inventory (source='case'), а не в транзакции. Связь —
+    // по моменту открытия (одна транзакция, один created_at) и числу предметов из
+    // «… xN»; source_ref не годится, его перезаписывает заявка на вывод. Уже
+    // учтённые предметы не берём дважды. Нет записи о предметах — исход неизвестен
+    // (из кейса всегда что-то выпадает), поэтому null, а не выдуманный 0.
+    function caseWin(bet){
+      const m=String(bet.comment||'').match(/\bx(\d+)\s*$/i);
+      const count=m?Math.max(1,Number(m[1])||1):1;
+      const rows=inv.filter(r=>!usedInv.has(r.id)&&String(r.created_at)===String(bet.created_at)).slice(0,count);
+      if(!rows.length) return null;
+      rows.forEach(r=>usedInv.add(r.id));
+      return rows.reduce((s,r)=>s+Number(r.price||0),0);
+    }
+
+    const entries=all.filter(r=>betTypes.includes(r.type)).map(r=>{
+      const bet=Math.abs(Number(r.amount)||0);
+      const win=r.type==='case_open'?caseWin(r):r.type==='upgrade'?txWin(r,'upgrade_win'):txWin(r,'battle_win');
+      const known=win!==null;
+      return {id:String(r.id),type:types[r.type],betAmount:money(bet),
+        winAmount:known?money(win):null,
+        multiplier:known&&bet>0?Number((win/bet).toFixed(2)):null,
+        houseEdge:known?money(bet-win):null,
+        isFree:bet===0,caseName:null,createdAt:iso(r.created_at),resultKnown:known,
+        description:r.comment||'',source:'transactions'};
+    });
+    history(req,res,entries);
   }));
   app.get('/api/v1/admin/wallet/:id/deposits',requireAdminJWT,forUser(async(req,res,row)=>{
     const deposits=await hasTable('deposits') ? await dbAll('SELECT * FROM deposits WHERE user_id=?',[row.id]) : [];
