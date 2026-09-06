@@ -470,6 +470,8 @@ fi
 # 5. Останавливаем сервисы
 # ---------------------------------------------------------------------------
 
+info "Если upload возвращает 413: проверьте client_max_body_size в активном nginx-vhost админки (deploy/README.md)."
+
 svc() {
   local action="$1" name="$2"
   case "$RESTART_KIND" in

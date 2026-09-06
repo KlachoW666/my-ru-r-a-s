@@ -53,3 +53,10 @@ test('AC2 nested API error message remains visible',()=>{
   assert.equal(formatter()({response:{status:400,data:{error:{message:'Некорректный состав кейса'}}}}),
     'Некорректный состав кейса');
 });
+
+test('nginx HTML errors identify upload limits and gateway downtime',()=>{
+  const format=formatter();
+  assert.match(format({response:{status:413,data:'<html>413 Request Entity Too Large</html>'}}), /лимит.*nginx/);
+  assert.match(format({response:{status:502,data:'<html>502 Bad Gateway</html>'}}), /временно недоступен/);
+  assert.equal(format({response:{status:413,data:{message:'Максимум 10 МБ'}}}), 'Максимум 10 МБ');
+});

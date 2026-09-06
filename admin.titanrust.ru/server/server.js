@@ -1163,7 +1163,8 @@ const storage = multer.diskStorage({
         cb(null, filename);
     }
 });
-const upload = multer({ storage });
+const MAX_UPLOAD_BYTES = 10 * 1024 * 1024;
+const upload = multer({ storage, limits: { fileSize: MAX_UPLOAD_BYTES } });
 
 // Serve static uploaded files
 app.use('/uploads', express.static(path.resolve(__dirname, '..', '..', 'public', 'uploads')));
@@ -1173,6 +1174,13 @@ app.post('/api/v1/admin/media/upload', requireAdminJWT, (req, res, next) => {
     upload.single('file')(req, res, (err) => {
         if (err) {
             console.error('[Upload Error]', err);
+            if (err.code === 'LIMIT_FILE_SIZE') {
+                return res.status(413).json({
+                    success: false,
+                    code: 'FILE_TOO_LARGE',
+                    message: 'Файл слишком большой. Максимальный размер — 10 МБ.'
+                });
+            }
             return res.status(400).json({ success: false, message: err.message });
         }
         if (!req.file) {

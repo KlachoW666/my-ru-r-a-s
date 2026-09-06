@@ -153,6 +153,48 @@ cp deploy/deploy.conf.example deploy/deploy.conf && nano deploy/deploy.conf
 
 ## Если что-то пошло не так
 
+### Загрузка баннера возвращает 413
+
+В активной конфигурации сервера от 6 сентября 2026 года нет `client_max_body_size`.
+nginx применяет стандартный лимит 1 MiB и отклоняет большие картинки до Node.
+Git-обновление и перезапуск PM2 не меняют конфиги в `/etc/nginx`.
+Лимит 12 MiB уже указан в шаблоне репозитория; приложение принимает картинки
+до 10 MiB (nginx нужен запас на multipart-заголовки).
+
+Посмотреть именно активную конфигурацию:
+
+```bash
+nginx -T 2>&1 | grep -nE 'configuration file|server_name|client_max_body_size|proxy_pass'
+```
+
+На проверенном сервере vhost админки — `/etc/nginx/sites-enabled/admin.titanrust.ru`.
+Откройте фактический файл (ссылка обычно ведёт в `sites-available`), предварительно
+сохранив копию:
+
+```bash
+admin_conf="$(readlink -f /etc/nginx/sites-enabled/admin.titanrust.ru)"
+cp -a "$admin_conf" "$admin_conf.bak-$(date +%Y%m%d-%H%M%S)"
+nano "$admin_conf"
+```
+
+Внутри HTTPS-блока `server` для `admin.titanrust.ru`, рядом с `server_name`,
+добавьте `client_max_body_size 12m;`. Если директива уже есть — измените её,
+не добавляйте вторую. Убедитесь, что внутри `location` загрузки нет меньшего лимита.
+Затем примените только при успешной проверке:
+
+```bash
+nginx -t && systemctl reload nginx
+```
+
+Повторите загрузку картинки размером 2–3 MiB: ожидается HTTP 200 с
+`data.url` и сохранение баннера. Без этой серверной правки фронтенд покажет
+понятное сообщение о лимите, но nginx по-прежнему будет отклонять файл.
+502 на нескольких фоновых запросах означает сбой связи nginx с приложением;
+если он повторяется, нужны nginx error.log и актуальные логи PM2 за это время.
+
+Обработка 413 и защита формы баннеров исправлены в собранных JS-файлах админки.
+При пересборке из Vue-исходников эти правки нужно перенести в исходники.
+
 ```bash
 sudo journalctl -u titanrust -n 100 --no-pager
 ```
