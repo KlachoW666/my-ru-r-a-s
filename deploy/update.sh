@@ -286,14 +286,25 @@ BACKUP_FILE="$BACKUP_DIR/database-$STAMP.sqlite"
 
 if [ -f "$DB_PATH" ]; then
   run mkdir -p "$BACKUP_DIR"
-  # sqlite3 .backup корректно снимает копию с работающей базы; если утилиты
-  # нет — обычное копирование. Оно безопасно, потому что сервисы мы
-  # останавливаем следующим шагом, а до этого копия нужна «как есть».
-  if command -v sqlite3 >/dev/null 2>&1; then
-    run sqlite3 "$DB_PATH" ".backup '$BACKUP_FILE'"
-  else
-    run cp "$DB_PATH" "$BACKUP_FILE"
+  # Online backup учитывает WAL и активные транзакции. Обычный cp работающей
+  # базы может потерять последние записи, поэтому его здесь не используем.
+  command -v sqlite3 >/dev/null 2>&1 || die "для безопасной копии нужен sqlite3: apt-get install sqlite3"
+  BACKUP_TEMP="$BACKUP_FILE.partial-$$"
+  BACKUP_OK=0
+  for BACKUP_ATTEMPT in 1 2 3; do
+    info "копирование SQLite: попытка $BACKUP_ATTEMPT/3, ожидание блокировки до 10 с"
+    if run sqlite3 -cmd ".timeout 10000" "$DB_PATH" ".backup '$BACKUP_TEMP'"; then
+      BACKUP_OK=1
+      break
+    fi
+    [ "$BACKUP_ATTEMPT" = 3 ] || sleep 2
+  done
+  [ "$BACKUP_OK" = 1 ] || die "SQLite остаётся занятой. Код не обновлён. Проверьте активные транзакции; частичная копия: $BACKUP_TEMP"
+  if [ "$DRY_RUN" = 0 ]; then
+    BACKUP_CHECK="$(sqlite3 -readonly "$BACKUP_TEMP" 'PRAGMA quick_check;' 2>&1)" || die "не удалось проверить копию: $BACKUP_CHECK"
+    [ "$BACKUP_CHECK" = "ok" ] || die "копия SQLite не прошла quick_check: $BACKUP_CHECK"
   fi
+  run mv "$BACKUP_TEMP" "$BACKUP_FILE"
   info "$BACKUP_FILE"
   # Старые копии подчищаем, иначе диск кончится незаметно.
   if [ "$DRY_RUN" = 0 ] && [ -d "$BACKUP_DIR" ]; then

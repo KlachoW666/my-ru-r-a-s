@@ -153,6 +153,28 @@ cp deploy/deploy.conf.example deploy/deploy.conf && nano deploy/deploy.conf
 
 ## Если что-то пошло не так
 
+### Обновление останавливается на database is locked
+
+Резервная копия создаётся через SQLite online backup с ожиданием блокировки
+до 10 секунд и тремя попытками. Скрипт проверяет копию через
+`PRAGMA quick_check` и только после успеха переходит к обновлению кода.
+Незавершённая копия имеет суффикс `.partial-<pid>` и не считается резервной.
+Если `sqlite3` отсутствует, установите его: `apt-get install sqlite3`.
+Копирование работающей базы через `cp` больше не используется: оно не учитывает WAL.
+
+Если на сервере осталась старая копия `update.sh` в корне, запускайте
+`bash deploy/update.sh`. Для получения нового скрипта до запуска обновления:
+
+```bash
+cd /var/www/titanrust
+git fetch origin main
+update_copy="$(mktemp /var/www/titanrust/update-new.XXXXXX.sh)"
+git show origin/main:deploy/update.sh > "$update_copy" && bash "$update_copy"
+```
+
+Временная копия лежит в корне проекта, чтобы скрипт определил правильный путь.
+При исчерпании попыток код остаётся прежним; частичный файл не подменяет рабочую базу.
+
 ### Загрузка баннера возвращает 413
 
 В активной конфигурации сервера от 6 сентября 2026 года нет `client_max_body_size`.
