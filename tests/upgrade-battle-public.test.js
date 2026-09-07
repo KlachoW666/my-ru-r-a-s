@@ -139,7 +139,9 @@ test('rendered create controls require explicit paid confirmation',async()=>{
    request:async q=>{calls.push(q);return{status:'success',data:q.url.endsWith('/items')?{items:targets,total:3}:{battles:[],config}};}});
  const render=api.UpgradeBattlePage.setup();mounts.forEach(fn=>fn());
  for(let i=0;i<5;i++)await new Promise(resolve=>setImmediate(resolve));
- let nodes=walk(render());const form=nodes.find(x=>x.type==='form');assert.ok(form);
+ let nodes=walk(render());assert.ok(!nodes.some(x=>x.type==='form'));
+ nodes.find(x=>x.type==='button'&&label(x)==='Создать батл').props.onClick();
+ nodes=walk(render());const form=nodes.find(x=>x.type==='form');assert.ok(form);
  form.props.onSubmit({preventDefault(){}});
  for(let i=0;i<5;i++)await new Promise(resolve=>setImmediate(resolve));
  nodes=walk(render());nodes.filter(x=>x.type==='button'&&x.props.class==='ub-item').forEach(x=>x.props.onClick());

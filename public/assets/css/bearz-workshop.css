@@ -3,7 +3,20 @@
 :root{--bz-line:color-mix(in srgb,var(--text-main) 12%,transparent);--bz-panel:color-mix(in srgb,var(--bg-panel) 94%,var(--sat-brass));--bz-soft:color-mix(in srgb,var(--sat-brass) 8%,transparent)}
 .bearz-shell .bz-layout{display:block!important}
 .bearz-shell{color:var(--text-main)}
+.bearz-shell [data-testid="promo-input"] input:focus-visible{outline:none!important;box-shadow:none!important}
+.bearz-shell [data-testid="promo-input"]:focus-within{outline:1px solid var(--accent-primary);outline-offset:0}
+.bearz-shell .header-left{flex:1;min-width:0;gap:20px!important}
+.bearz-shell .header-nav{min-width:0;flex-shrink:1;transform:none!important}
+.bearz-shell .header-right{flex-shrink:0;transform:none!important}
+@media(min-width:768px) and (max-width:1450px){.bearz-shell .header-online{display:none!important}.bearz-shell .header-nav{gap:2px!important}.bearz-shell .nav-link{padding-inline:8px!important;font-size:12px!important}.bearz-shell .header-left{gap:14px!important}}
+@media(min-width:768px) and (max-width:1150px){.bearz-shell .nav-label{display:none!important}.bearz-shell .nav-link{padding-inline:9px!important}}
 .bearz-shell .zm-step svg{display:block;flex-shrink:0;color:var(--accent-primary)}
+.bearz-shell .zm-how{background:var(--bg-panel);border:1px solid var(--bz-line);border-radius:6px;box-shadow:none;padding:24px}
+.bearz-shell .zm-head{padding-bottom:24px;border-bottom:1px solid var(--bz-line)}
+.bearz-shell .zm-tabs{gap:8px}
+.bearz-shell .zm-tabs button{border-radius:4px;box-shadow:none;border:1px solid var(--bz-line)}
+.bearz-shell .zm-create{border-radius:4px;box-shadow:none}
+.bearz-shell .zm-empty{border:1px dashed var(--bz-line);border-radius:6px;background:var(--bg-panel)}
 .bearz-shell .layout-content{width:100%!important;padding-top:0!important}
 .bearz-shell .page-view,.bearz-shell .header-inner{max-width:1320px!important;width:100%;margin-inline:auto;padding-inline:32px!important}
 .bearz-shell .header-bar{margin-top:0;padding-block:20px;top:0;background:var(--bg-canvas);border-bottom:1px solid var(--bz-line)}
@@ -27,6 +40,17 @@
 .bearz-shell .live-drop-panel .hover-layer,.bearz-shell .live-drop-panel .gold-glow,.bearz-shell .live-drop-panel .bw-fire,.bearz-shell .live-drop-panel .bw-sparks{display:none!important}
 .bearz-shell .live-drop-panel .item-card{filter:none!important;opacity:1!important;box-shadow:none!important;transform:none!important}
 .bearz-shell .live-drop-panel .item-card:hover{outline:1px solid var(--sat-brass);outline-offset:-1px}
+.bz-drop-source{position:absolute;inset:0;z-index:30;display:flex;align-items:center;justify-content:center;padding:7px;background:var(--bg-panel);color:var(--text-main);font-size:11px;font-weight:650;text-align:center;overflow-wrap:anywhere;opacity:0;pointer-events:none;transition:opacity .15s var(--ease-ui)}
+.bz-drop-source{display:none}
+.bearz-shell .live-drop-panel .hover-layer{display:block!important;inset:0!important;z-index:35;background:var(--bg-panel);opacity:0;pointer-events:none}
+.bearz-shell .live-drop-panel .item-card:hover .hover-layer,.bearz-shell .live-drop-panel .item-card:focus-visible .hover-layer{opacity:1!important;transform:none!important}
+.bearz-shell .live-drop-panel .hover-case{position:absolute!important;inset:0!important;width:100%!important;height:100%!important;mask-image:none!important;-webkit-mask-image:none!important}
+.bearz-shell .live-drop-panel .hover-case img{position:absolute!important;inset:0!important;width:100%!important;height:100%!important;object-fit:contain!important;opacity:1!important}
+.bearz-shell .live-drop-panel .hover-case{transform:none!important;animation:none!important}
+.bearz-shell .live-drop-panel .hover-user{top:auto!important;bottom:3px!important;left:4px!important;right:4px!important;z-index:5;background:var(--bg-panel);border-radius:3px;padding:2px}
+.bearz-shell .live-drop-panel .hover-user span{font-size:10px!important;line-height:12px!important}
+.bearz-shell .live-drop-panel .upgrader-hover-bg-mask{inset:3px 22px 18px!important;width:auto!important;height:auto!important;transform:none!important;mask-image:none!important;-webkit-mask-image:none!important}
+.bearz-shell .live-drop-panel .hover-case-aura,.bearz-shell .live-drop-panel .hover-rarity-shadow{display:none!important}
 .bearz-shell .live-drop-panel .item-card:hover .item-image,.bearz-shell .live-drop-panel .item-card:hover .price-container{opacity:1!important;filter:none!important;transform:none!important}
 .bearz-shell .live-drop-panel:before,.bearz-shell .live-drop-panel:after{display:none!important}
 .bz-home{padding-top:8px}

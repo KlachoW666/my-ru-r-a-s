@@ -205,6 +205,7 @@ export const UpgradeBattlePage = defineComponent({
     const user = useUserStore(), auth = useAuthStore();
     const model = createBattleModel({refreshBalance: () => user.fetchUserData()});
     const s = model.state;
+    const builderOpen = ref(false);
     const paidAction = action => () => {
       if (!auth.isAuthenticated) { s.value.error = 'Нужно войти в аккаунт для участия.'; auth.openAuthModal?.(); return; }
       action();
@@ -229,11 +230,13 @@ export const UpgradeBattlePage = defineComponent({
       const state = s.value, c = state.config;
       if (!c) return null;
       if (!c.enabled) return h('section', {class: 'ub-panel'}, 'Новые апгрейд-батлы временно выключены. История и возврат взноса остаются доступны.');
-      return h('section', {class: 'ub-panel'}, [h('h2', null, 'Создать апгрейд-батл'),
-        h('p', {class: 'ub-muted'}, `1 на 1 · 3 раунда · RTP ${percent(c.rtp)} · ожидание ${Math.round(c.waitSeconds / 60)} мин.`),
-        field('Ставка за один раунд, ₽', 'roundBet', {inputmode: 'decimal'}),
-        h('p', null, `Взнос за три раунда: ${validMoney(amount(state.roundBet)) ? money(Math.round(amount(state.roundBet) * 100) * 3 / 100) : '—'}`),
-        h('div', {class: 'ub-targets'}, state.selected.map((t, i) => targetCard({...t, chance: amount(state.roundBet) / t.price * c.rtp}, i, true))),
+      return h('section', {class: 'ub-panel ub-builder'}, [
+        h('header', {class: 'ub-builder-heading'}, [h('div', null, [h('p', {class: 'bz-eyebrow'}, 'BEARZ / КОНСТРУКТОР БАТЛА'),h('h2', null, 'Собери свою дуэль'),h('p', {class:'ub-muted'}, 'Три цели. Два игрока. Одинаковые условия.')]),h('span',{class:'ub-builder-badge'},'01 / АПГРЕЙДЫ')]),
+        h('div',{class:'ub-builder-layout'},[
+        h('div',{class:'ub-builder-main'},[
+        h('h3',{class:'ub-section-title'},'01 — Выбери цели раундов'),
+        h('div', {class: 'ub-targets ub-builder-slots'}, [0,1,2].map(i => state.selected[i] ? targetCard({...state.selected[i], chance: amount(state.roundBet) / state.selected[i].price * c.rtp}, i, true) :
+          h('div',{class:'ub-empty-slot',key:i},[h('span',{class:'ub-muted'},`Раунд ${i+1}`),h('span',{class:'ub-slot-plus','aria-hidden':'true'},'+'),h('strong',null,'Выбери скин'),h('small',{class:'ub-muted'},'Из каталога ниже')]))),
         h('form', {class: 'ub-filters', onSubmit: event => { event.preventDefault(); model.searchItems(); }}, [
           field('Название скина', 'searchText', {placeholder: 'Например, MP5'}),
           field('Цена от, ₽', 'minPrice', {inputmode: 'decimal', placeholder: '10 000'}),
@@ -246,23 +249,40 @@ export const UpgradeBattlePage = defineComponent({
           disabled: model.formLocked() || state.selected.length >= 3,
           onClick: () => { if (!model.formLocked() && state.selected.length < 3) state.selected.push({...item}); }
         }, [itemImage(item), h('span', null, item.name), h('strong', null, money(item.price))]))),
-        h('p', {class: 'ub-muted'}, 'Цена цели должна быть выше ставки за раунд, шанс — от 1% до 95%. Цены и шансы окончательно фиксируются сервером при создании.'),
-        button('Создать батл', paidAction(model.prepareCreate), model.formLocked() || state.selected.length !== 3, true)
+        !state.items.length && !state.searching && !state.itemError ? h('div',{class:'ub-catalog-hint'},'Найди скин по названию или цене и добавь его в свободный раунд.') : null
+        ]),
+        h('aside',{class:'ub-builder-summary'},[
+          h('h3',{class:'ub-section-title'},'02 — Условия дуэли'),
+          field('Ставка за один раунд, ₽', 'roundBet', {inputmode: 'decimal'}),
+          h('dl',{class:'ub-summary-facts'},[
+            h('div',null,[h('dt',null,'Формат'),h('dd',null,'1 на 1 · 3 раунда')]),
+            h('div',null,[h('dt',null,'Выбрано целей'),h('dd',null,`${state.selected.length} / 3`)]),
+            h('div',null,[h('dt',null,'RTP'),h('dd',null,percent(c.rtp))]),
+            h('div',null,[h('dt',null,'Ожидание'),h('dd',null,`${Math.round(c.waitSeconds/60)} мин.`)])]),
+          h('div',{class:'ub-entry-total'},[h('span',null,'Взнос за три раунда'),h('strong',null,validMoney(amount(state.roundBet)) ? money(Math.round(amount(state.roundBet)*100)*3/100) : '—')]),
+          button('Создать батл', paidAction(model.prepareCreate), model.formLocked() || state.selected.length !== 3, true),
+          h('p', {class: 'ub-muted'}, 'Перед списанием покажем подтверждение. Цена каждой цели должна быть выше ставки, шанс — 1–95%. Цены и шансы фиксирует сервер.')
+        ])])
       ]);
     }
     function lobby() {
       const state = s.value;
-      return h('div', {class: 'ub-lobby'}, [h('section', {class: 'ub-panel'}, [
+      return h('div', {class: 'ub-lobby ub-lobby-matched'}, [h('section', {class: 'ub-lobby-main'}, [
         h('div', {class: 'ub-toolbar'}, [h('h2', null, 'Апгрейд-батлы'),
-          button(state.history ? 'Показать ожидающие' : 'История батлов', () => { state.history = !state.history; model.load(); }, state.loading),
-          button('Обновить', () => model.load(), state.loading)]),
-        !state.battles.length && state.loaded && !state.error ? h('p', {class: 'ub-muted'}, state.history ? 'Завершённых батлов пока нет.' : 'Пока нет ожидающих батлов. Создайте первый.') : null,
+          button('Активные', () => { state.history = false; model.load(); }, state.loading, !state.history),
+          button('Завершённые', () => { state.history = true; model.load(); }, state.loading, state.history)]),
+        !state.battles.length && state.loaded && !state.error ? h('div', {class: 'ub-lobby-empty'}, [h('img',{src:'/image/icon-logo.png',alt:'',width:64,height:64}),h('p', {class: 'ub-muted'}, state.history ? 'Завершённых батлов пока нет.' : 'Нет активных батлов')]) : null,
         ...state.battles.map(b => h('article', {class: 'ub-room-row', key: b.uid}, [
           h('div', null, [h('strong', null, b.players[0]?.name || 'Игрок'), h('p', {class: 'ub-muted'}, `${statusText(b.status)} · 3 раунда · RTP ${percent(b.rtp)}`)]),
           h('div', {class: 'ub-thumbnails'}, b.targets.map(t => itemImage(t))),
           h('strong', null, money(b.entryPrice)), h('a', {class: 'ub-button ub-primary', href: roomUrl(b.uid)}, b.status === 'waiting' ? 'Открыть батл' : 'Результаты')
         ]))
-      ]), creation()]);
+      ]),h('aside',{class:'ub-lobby-side'},[
+        button(builderOpen.value ? 'Скрыть создание' : 'Создать батл',()=>{builderOpen.value=!builderOpen.value},!state.config?.enabled,true),
+        h('section',{class:'ub-panel ub-how'},[h('h2',null,'Как участвовать в батлах?'),
+          ...['Выберите три цели и создайте батл.','Когда соперник присоединится, начнутся три раунда апгрейда.','Победитель получает общий приз. При ничьей он делится.'].map((text,i)=>h('p',null,[h('svg',{viewBox:'0 0 24 24',width:28,height:28,fill:'none',stroke:'currentColor','stroke-width':1.8,'stroke-linecap':'round','stroke-linejoin':'round','aria-hidden':'true'},[h('path',{d:['M4 8h16v12H4z M8 8V4h8v4 M12 12v5 M9.5 14.5h5','M9 11a3 3 0 1 0 0-6 3 3 0 0 0 0 6 M3 20v-3a6 6 0 0 1 12 0v3 M17 5a3 3 0 0 1 0 6 M18 14a5 5 0 0 1 3 4v2','M7 3h10v6a5 5 0 0 1-10 0z M7 5H3v3a4 4 0 0 0 4 4 M17 5h4v3a4 4 0 0 1-4 4 M12 14v6 M8 21h8'][i]})]),h('span',null,text)]))]),
+        state.config && !state.config.enabled ? h('p',{class:'ub-muted'},'Создание временно выключено. История и возврат взноса доступны.') : null
+      ]),builderOpen.value ? h('div',{class:'ub-lobby-builder'},[creation()]) : null]);
     }
     function playerPanel(battle, slot) {
       const player = battle.players.find(p => p.slot === slot), shown = s.value.visibleRounds;
