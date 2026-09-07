@@ -62,7 +62,7 @@ test('online uses the admin base with the compiled header response shape',async 
     assert.equal(body.data.stats.totalUsers,2);
   }
 });
-test('desktop header includes the requested SATHCEL text beside its mark',()=>{
+test('desktop header includes bearz.top beside its mark',()=>{
   const source=fs.readFileSync(path.resolve(__dirname,'../public/assets/js/bottom-bar-DySVlKhO.js'),'utf8');
   assert.ok(source.includes('header-wordmark'));
   const start=source.indexOf('o("span",{class:"header-wordmark"');
@@ -70,7 +70,7 @@ test('desktop header includes the requested SATHCEL text beside its mark',()=>{
   const expression=source.slice(start,end-1);
   // Execute the exact compiled static vnode; this is not a separate mock logo.
   const node=vm.runInNewContext(expression,{o:(tag,props,children)=>({tag,props,children})});
-  assert.equal(node.children[1].children,'SATHCEL');
+  assert.equal(node.children[1].children,'bearz.top');
   assert.equal(node.children[0].props.src,'/brand/logo-mark.svg');
 });
 test('online updates use the event consumed by the open header',async()=>{

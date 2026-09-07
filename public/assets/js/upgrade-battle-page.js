@@ -14,6 +14,14 @@ const validMoney = value => Number.isFinite(value) && value > 0 && Math.abs(valu
 const statusText = status => ({waiting: 'Ожидает соперника', finished: 'Завершён', cancelled: 'Отменён'}[status] || 'Неизвестный статус');
 const imageUrl = value => typeof value === 'string' && (/^\/(?!\/)/.test(value) || /^https?:\/\//i.test(value)) ? value : '';
 
+// Presentation only: the server has already settled all six rolls atomically.
+export function battlePlayback(start, now) {
+  const elapsed = Math.max(0, now - start);
+  return {index: Math.min(2, Math.floor(elapsed / 5000)),
+    visible: Math.min(3, Math.floor((elapsed + 1000) / 5000)),
+    offset: elapsed % 5000, done: elapsed >= 15000};
+}
+
 function apiData(response) {
   if (response?.status !== 'success' || !response.data || typeof response.data !== 'object' || Array.isArray(response.data)) {
     throw new Error('Сервер вернул неверный ответ. Обновите страницу или повторите запрос.');
@@ -39,7 +47,7 @@ export function createBattleModel({request: send = request, uuid = () => crypto.
   const state = ref({config: null, battles: [], battle: null, loading: false, loaded: false,
     busy: false, error: '', notice: '', history: false, roundBet: 100, selected: [],
     searchText: '', minPrice: '', maxPrice: '', items: [], total: 0, searching: false,
-    itemError: '', confirmation: null, visibleRounds: 3});
+    itemError: '', confirmation: null, visibleRounds: 3, playback: null});
   let uid = new URLSearchParams(search).get('battle');
   let disposed = false, pollTimer = null, animationTimer = null, searchVersion = 0, loadVersion = 0;
   const timers = new Set();
@@ -67,15 +75,25 @@ export function createBattleModel({request: send = request, uuid = () => crypto.
     const s = state.value;
     s.battle = checkedRoom(battle);
     clearTimeout(animationTimer);
-    s.visibleRounds = animate && battle.status === 'finished' ? 0 : 3;
-    if (s.visibleRounds === 0) {
-      const reveal = () => {
-        if (disposed) return;
-        s.visibleRounds++;
-        if (s.visibleRounds < 3) animationTimer = setTimeout(reveal, 1100);
-      };
-      animationTimer = setTimeout(reveal, 1100);
-    }
+    s.visibleRounds = 3; s.playback = null;
+    const start = Date.parse(battle.finishedAt);
+    if (battle.status === 'finished' && Number.isFinite(start) && Date.now() - start < 15000) play(start);
+  }
+  function play(start = Date.now()) {
+    clearTimeout(animationTimer);
+    const tick = () => {
+      if (disposed) return;
+      const phase = battlePlayback(start, Date.now());
+      const previous = state.value.playback;
+      state.value.visibleRounds = phase.visible;
+      state.value.playback = phase.done ? null : {...phase, start,
+        delay: previous?.start === start && previous.index === phase.index ? previous.delay : phase.offset};
+      if (!phase.done) animationTimer = setTimeout(tick, 100);
+    };
+    tick();
+  }
+  function replay() {
+    if (state.value.battle?.status === 'finished' && !state.value.playback) play();
   }
   async function load(silent = false) {
     if (disposed || state.value.busy) { schedulePoll(); return; }
@@ -169,7 +187,7 @@ export function createBattleModel({request: send = request, uuid = () => crypto.
     disposed = true; ++loadVersion; ++searchVersion; stopPoll(); clearTimeout(animationTimer);
     for (const timer of timers) clearTimeout(timer); timers.clear();
   }
-  return {state, load, searchItems, prepareCreate, prepareJoin, prepareCancel, confirm, formLocked, newForm, dispose};
+  return {state, load, searchItems, prepareCreate, prepareJoin, prepareCancel, confirm, formLocked, newForm, replay, dispose};
 }
 
 function ensureStyles() {
@@ -253,6 +271,7 @@ export const UpgradeBattlePage = defineComponent({
       return h('section', {class: 'ub-player ub-panel'}, [
         player?.avatar && imageUrl(player.avatar) ? h('img', {class: 'ub-avatar', src: imageUrl(player.avatar), alt: ''}) : h('span', {class: 'ub-avatar', 'aria-hidden': 'true'}, '♙'),
         h('h2', null, player?.name || 'Место для соперника'),
+        wheel(battle, slot),
         h('p', {class: 'ub-score'}, money(score)),
         h('ol', {class: 'ub-results'}, battle.targets.map((target, index) => {
           const result = results.find(r => r.roundIndex === index);
@@ -263,22 +282,43 @@ export const UpgradeBattlePage = defineComponent({
         battle.status === 'finished' && shown === 3 && player ? h('p', null, `Выплата на баланс: ${money(player.payout)}`) : null
       ]);
     }
+    function wheel(battle, slot) {
+      const phase = s.value.playback;
+      const index = phase?.index ?? (battle.status === 'finished' ? 2 : 0);
+      const target = battle.targets[index];
+      const result = battle.rounds.find(r => r.slot === slot && r.roundIndex === index);
+      const valid = Number.isFinite(result?.roll) && result.roll >= 0 && result.roll < 1;
+      const revealed = !phase || phase.offset >= 4000;
+      const angle = valid ? 1440 + result.roll * 360 : 0;
+      return h('div', {class: 'ub-wheel-wrap'}, [
+        h('div', {class: 'ub-wheel', style: {'--chance-angle': `${target.chance * 360}deg`},
+          role: 'img', 'aria-label': `Раунд ${index + 1}. Шанс ${percent(target.chance)}. ${revealed && valid ? result.won ? 'Успех' : 'Неудача' : 'Ожидание результата'}`}, [
+          h('div', {class: 'ub-wheel-center'}, [itemImage(target), h('strong', null, percent(target.chance))]),
+          h('div', {key: `${battle.uid}-${slot}-${index}-${phase?.start ?? 'saved'}`, class: `ub-wheel-hand${phase && valid ? ' is-playing' : ''}`,
+            style: {'--roll-angle': `${angle}deg`, animationDelay: `${-(phase?.delay ?? 0)}ms`, transform: `rotate(${angle}deg)`}}, [h('i')])
+        ]),
+        h('p', {class: revealed && result?.won ? 'ub-wheel-label ub-won' : 'ub-wheel-label', role: 'status'},
+          !valid ? 'Ждём соперника' : !revealed ? `Апгрейд · раунд ${index + 1}` : result.won ? 'Успешный апгрейд' : 'Неудачный апгрейд')
+      ]);
+    }
     function detail() {
       const battle = s.value.battle, shown = s.value.visibleRounds;
-      const targetIndex = battle.status === 'finished' ? Math.min(shown, 2) : 0;
+      const targetIndex = s.value.playback?.index ?? (battle.status === 'finished' ? 2 : 0);
       return h('div', null, [h('div', {class: 'ub-toolbar'}, [
         h('a', {class: 'ub-button', href: lobbyUrl}, '← К списку'), h('h1', null, 'Батл на апгрейдах'),
-        h('span', {role: 'status'}, statusText(battle.status))]),
+        h('span', {role: 'status'}, s.value.playback ? 'Показ раундов' : statusText(battle.status))]),
         h('p', {class: 'ub-muted'}, `Взнос: ${money(battle.entryPrice)} · RTP ${percent(battle.rtp)} · одинаковые цели для обоих`),
         h('div', {class: 'ub-duel'}, [playerPanel(battle, 0), h('section', {class: 'ub-current'}, [
-          h('h2', null, shown < 3 ? `Раунд ${shown + 1} из 3` : 'Цели батла'), targetCard(battle.targets[targetIndex], targetIndex),
+          h('h2', null, s.value.playback ? `Раунд ${targetIndex + 1} из 3` : 'Цели батла'), targetCard(battle.targets[targetIndex], targetIndex),
           battle.status === 'waiting' ? h('p', {class: 'ub-muted'}, `Ожидание до ${new Date(battle.expiresAt).toLocaleString('ru-RU')}. Если соперник не найдётся, взнос вернётся автоматически.`) : null,
           battle.status === 'waiting' && !battle.viewerIsPlayer ? button(`Войти за ${money(battle.entryPrice)}`, paidAction(model.prepareJoin), s.value.busy, true) : null,
           battle.status === 'waiting' && battle.viewerIsCreator ? button('Отменить и вернуть взнос', model.prepareCancel, s.value.busy) : null
         ]), playerPanel(battle, 1)]),
         battle.status === 'finished' && shown === 3 ? h('section', {class: 'ub-panel ub-outcome', role: 'status'}, [
           h('h2', null, battle.pot === 0 ? 'Нет успешных апгрейдов' : battle.winnerUserIds.length > 1 ? 'Ничья — приз разделён' : `Победитель: ${battle.players.find(p => p.userId === battle.winnerUserIds[0])?.name || '—'}`),
-          h('p', null, `Общий приз: ${money(battle.pot)}. Выплаты уже сохранены сервером.`)
+          h('p', null, `Общий приз: ${money(battle.pot)}. Выплаты уже сохранены сервером.`),
+          button('Повторить анимацию', model.replay, !!s.value.playback),
+          h('small', {class: 'ub-muted'}, 'Повтор показывает сохранённые результаты. Новых ставок и выплат нет.')
         ]) : null,
         battle.status === 'cancelled' ? h('p', {class: 'ub-panel'}, `${battle.cancelReason || 'Батл отменён'}. Взнос возвращён создателю.`) : null,
         h('div', {class: 'ub-targets'}, battle.targets.map((t, i) => targetCard(t, i))),

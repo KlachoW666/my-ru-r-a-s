@@ -1,2 +1,2 @@
-/* Значок валюты bearup.top: медвежья лапа. Контракт и размер сохранены. */
+/* Значок валюты bearz.top: медвежья лапа. Контракт и размер сохранены. */
 import{o,b as t,H as f}from"./vendor-vNcy1sFx.js";const r={xmlns:"http://www.w3.org/2000/svg",width:"16",height:"16",fill:"none",viewBox:"0 0 16 16"};function s(s,e){return o(),t("svg",r,e[0]||(e[0]=[f('<image href="/image/icon-money.png" x="0" y="0" width="16" height="16" preserveAspectRatio="xMidYMid meet"></image>',1)]))}const c={render:s};export{c as default,s as render};

@@ -1,4 +1,14 @@
 .ub-modes { width: 100%; min-width: 0; }
+.ub-wheel-wrap{margin:20px auto;text-align:center;width:100%}
+.ub-wheel{width:min(100%,220px);aspect-ratio:1;margin:auto;border-radius:50%;position:relative;background:conic-gradient(var(--accent-primary) 0deg var(--chance-angle),var(--bg-control) var(--chance-angle) 360deg);border:1px solid var(--border-strong)}
+.ub-wheel-center{position:absolute;inset:14px;border-radius:50%;background:var(--bg-panel);display:flex;flex-direction:column;align-items:center;justify-content:center;gap:8px}
+.ub-wheel-center .ub-skin{width:72px;height:72px;object-fit:contain}
+.ub-wheel-hand{position:absolute;inset:0;border-radius:50%;pointer-events:none}
+.ub-wheel-hand i{position:absolute;top:0;left:calc(50% - 5px);width:10px;height:24px;background:var(--text-main);clip-path:polygon(0 0,100% 0,50% 100%)}
+.ub-wheel-hand.is-playing{animation:ub-roll 4s cubic-bezier(.12,.6,.15,1) both}
+.ub-wheel-label{min-height:24px;font-size:13px}
+@keyframes ub-roll{from{transform:rotate(0deg)}to{transform:rotate(var(--roll-angle))}}
+@media(prefers-reduced-motion:reduce){.ub-wheel-hand.is-playing{animation:none}}
 .ub, .ub-mode-nav { font-family: var(--font-onest); color: var(--text-main); }
 .ub { display: grid; gap: 24px; padding-bottom: 48px; font-size: var(--text-body-s); line-height: var(--leading-body); }
 .ub *, .ub-mode-nav * { box-sizing: border-box; }

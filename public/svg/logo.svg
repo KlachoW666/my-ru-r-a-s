@@ -1,5 +1,5 @@
-<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 372 64" role="img" aria-label="bearup.top">
-  <title>bearup.top</title>
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 372 64" role="img" aria-label="bearz.top">
+  <title>bearz.top</title>
   <!-- Знак + доменное имя нового бренда. -->
   <svg x="0" y="0" width="64" height="64" viewBox="4 6 58 54" overflow="visible">
     <rect x="11" y="26" width="42" height="29" rx="5" fill="none" stroke="#f36a21" stroke-width="4"/>
@@ -11,5 +11,5 @@
     <polyline points="43 26 47 20 52 17" fill="none" stroke="#f36a21" stroke-width="3.2" stroke-linecap="round" stroke-linejoin="round"/>
     <circle cx="55" cy="14" r="4.2" fill="#ffb347"/>
   </svg>
-  <text x="76" y="45" font-family="Onest, 'Segoe UI', system-ui, -apple-system, sans-serif" font-size="40" font-weight="900" letter-spacing="1" fill="var(--sat-logo-text, #f2eee6)">bearup.top</text>
+  <text x="76" y="45" font-family="Onest, 'Segoe UI', system-ui, -apple-system, sans-serif" font-size="40" font-weight="900" letter-spacing="1" fill="var(--sat-logo-text, #f2eee6)">bearz.top</text>
 </svg>

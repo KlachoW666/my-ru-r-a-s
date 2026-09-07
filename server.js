@@ -1524,20 +1524,10 @@ app.get(['/api/v1/config', '/api/v1/config/games', '/api/v1/game/config'], async
 
 app.get(['/api/v1/config/socials', '/config/socials'], async (req, res) => {
   const links = await cached('siteSocials', 30000, async () => {
-    const rows = await queryAdminDb(`SELECT name, url FROM social_links WHERE enabled = 1 ORDER BY position ASC`);
-    return rows.filter(r => r.url).map(r => ({ name: r.name, url: r.url }));
+    const rows = await queryAdminDb(`SELECT id, name, url FROM social_links WHERE enabled = 1 ORDER BY position ASC`);
+    return require('./services/publicSocials').publicSocials(rows);
   });
-  if (links.length) return res.json({ status: "success", data: { links } });
-  // Таблицы ещё нет — отдаём прежний список, чтобы блок не опустел.
-  res.json({
-    status: "success",
-    data: {
-      links: [
-        { name: "Telegram", url: "https://t.me/kabangg" },
-        { name: "VK", url: "https://vk.com/kabangg" }
-      ]
-    }
-  });
+  res.json({ status: "success", data: { links } });
 });
 
 // Promo code endpoints

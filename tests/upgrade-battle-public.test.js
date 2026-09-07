@@ -48,10 +48,23 @@ function load(overrides={}){
     crypto:require('node:crypto').webcrypto,request:async()=>{},document:{getElementById:()=>true},
     window:{location:{search:'?mode=upgrade',assign:()=>{}}},...overrides};
   vm.createContext(context);
-  vm.runInContext(code+'\nthis.api={createBattleModel,withBattleModes,UpgradeBattlePage};',context);
+  vm.runInContext(code+'\nthis.api={createBattleModel,withBattleModes,UpgradeBattlePage,battlePlayback};',context);
   return context.api;
 }
 const config={enabled:true,rtp:.95,minRoundBet:1,maxRoundBet:10000,waitSeconds:900};
+test('wheel timeline reveals each pair only after four seconds and restores phase',()=>{
+ const {battlePlayback:p}=load();
+ for(const [elapsed,index,visible] of [[0,0,0],[3999,0,0],[4000,0,1],[5000,1,1],[8999,1,1],[9000,1,2],[10000,2,2],[14000,2,3]]){
+  const phase=p(100000,100000+elapsed);assert.equal(phase.index,index);assert.equal(phase.visible,visible);
+ }
+ assert.equal(p(100000,115000).done,true);
+ assert.equal(p(100000,99000).visible,0);
+});
+test('replaying a saved battle never sends a paid request',async()=>{
+ const calls=[];const m=setup(async q=>{calls.push(q);return{status:'success',data:{battle:room('finished')}}},'?battle=room-1');
+ await m.load();m.replay();assert.equal(m.state.value.visibleRounds,0);assert.ok(m.state.value.playback);
+ assert.equal(calls.length,1);assert.equal(calls[0].method,'GET');m.dispose();
+});
 const targets=[1,2,3].map(id=>({id,name:'Skin '+id,price:500,image:'/skin.png',rarity:'RARE',chance:.19}));
 function room(status='waiting'){return{uid:'room-1',status,roundBet:100,entryPrice:300,rtp:.95,createdAt:'2026-09-03T00:00:00Z',expiresAt:'2099-09-03T00:15:00Z',finishedAt:null,serverHash:'abc',serverSeed:status==='finished'?'seed':null,targets,players:[{userId:1,name:'Alice',avatar:'',slot:0,score:500,payout:1000,clientSeed:'client'}],rounds:status==='finished'?[{roundIndex:0,slot:0,roll:.1,won:true,value:500}]:[],pot:1000,winnerUserIds:[1],viewerIsCreator:true,viewerIsPlayer:true};}
 function setup(send,search=''){

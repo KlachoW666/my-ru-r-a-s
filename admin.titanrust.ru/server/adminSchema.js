@@ -195,8 +195,8 @@ const SEEDS = [
      ('deposit_chain','Депозитная лестница',1,0,0,0)`],
 
   ['social_links', `INSERT INTO social_links (id, name, url, enabled, position) VALUES
-     ('telegram','Telegram','https://t.me/kabangg',1,0),
-     ('vk','VK','https://vk.com/kabangg',1,1),
+     ('telegram','Telegram','https://t.me/bearztop',1,0),
+     ('vk','VK','https://vk.com/bearztop',1,1),
      ('discord','Discord','',0,2)`],
 
   ['bots', `INSERT INTO bots (name, avatar, balance, strategy, min_bet, max_bet, active) VALUES
@@ -233,8 +233,8 @@ const SETTINGS = {
   streamer_configs: { enabled: true, defaultRevenueShare: 5, minPayout: 5000, showStatsPublicly: true },
   socials: {
     links: [
-      { name: 'Telegram', url: 'https://t.me/kabangg', enabled: true },
-      { name: 'VK', url: 'https://vk.com/kabangg', enabled: true },
+      { name: 'Telegram', url: 'https://t.me/bearztop', enabled: true },
+      { name: 'VK', url: 'https://vk.com/bearztop', enabled: true },
       { name: 'Discord', url: '', enabled: false }
     ]
   }

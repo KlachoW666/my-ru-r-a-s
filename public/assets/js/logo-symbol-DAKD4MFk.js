@@ -1,2 +1,2 @@
-/* Компактный знак bearup.top с медведем. Контракт модуля сохранён. */
+/* Компактный знак bearz.top с медведем. Контракт модуля сохранён. */
 import{o as c,b as s,H as f}from"./vendor-vNcy1sFx.js";const P={xmlns:"http://www.w3.org/2000/svg",viewBox:"0 0 96 96",fill:"none"};function n(_ctx,_cache){return c(),s("svg",P,_cache[0]||(_cache[0]=[f('<image href="/image/icon-logo.png" x="0" y="0" width="96" height="96" preserveAspectRatio="xMidYMid meet"></image>',1)]))}const m={render:n};export{m as default,n as render};

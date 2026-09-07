@@ -1,4 +1,4 @@
-# bearup.top — bearup.top
+# bearz.top — bearz.top
 
 User-agent: *
 Allow: /
@@ -41,4 +41,4 @@ Disallow: /
 User-agent: DotBot
 Disallow: /
 
-Sitemap: https://bearup.top/sitemap.xml
+Sitemap: https://bearz.top/sitemap.xml
