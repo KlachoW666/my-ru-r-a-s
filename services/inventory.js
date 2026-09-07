@@ -131,12 +131,23 @@ function makeInventoryService({ queryAdminDb, getAdminDb, adjustBalanceById, rec
   }
 
   // The entire opening either commits or leaves both money and inventory intact.
-  async function settleCase(userId, {cost, drops, ref}) {
+  //
+  // discountId — выигранная на колесе скидка. Она гасится ЗДЕСЬ, одной
+  // транзакцией со списанием: погаси её раньше — сбой открытия сожжёт скидку
+  // впустую; погаси позже — два параллельных открытия применят её дважды.
+  // Условие used_at IS NULL и проверка changes делают второе невозможным.
+  async function settleCase(userId, {cost, drops, ref, discountId=null}) {
     await ensureSchema();
     const costCents=cents(cost);
     if (!Array.isArray(drops) || !drops.length || drops.length>5) throw new Error('Некорректное количество кейсов');
     drops.forEach(d=>cents(d.price));
     return transaction(getAdminDb, async tx=>{
+      if(discountId!=null){
+        const used=await tx.run(
+          `UPDATE case_discounts SET used_at=CURRENT_TIMESTAMP, used_case_slug=?
+           WHERE id=? AND user_id=? AND used_at IS NULL`, [String(ref||''),discountId,userId]);
+        if(used.changes!==1) throw Object.assign(new Error('Скидка уже использована'),{code:'DISCOUNT_SPENT',status:409});
+      }
       const debit=await tx.run('UPDATE users SET balance=ROUND(balance-?,2) WHERE id=? AND ROUND(balance*100)>=?', [costCents/100,userId,costCents]);
       if(debit.changes!==1) throw Object.assign(new Error('Недостаточно средств или баланс недоступен'),{code:'INSUFFICIENT_BALANCE',status:400});
       const awards=[];
@@ -145,7 +156,7 @@ function makeInventoryService({ queryAdminDb, getAdminDb, adjustBalanceById, rec
       const balance=(await tx.get('SELECT balance FROM users WHERE id=?',[userId])).balance;
       return {balance,newBalance:balance,winnings:awards.reduce((sum,a)=>sum+cents(a.value),0)/100,
         rewardDestination:AUTO_SELL?'balance':'inventory',inventoryIds:awards.map(a=>a.id),
-        sellFeePercent:SELL_FEE_PERCENT};
+        sellFeePercent:SELL_FEE_PERCENT,discountApplied:discountId!=null};
     });
   }
 

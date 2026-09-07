@@ -716,6 +716,8 @@ const inventory = makeInventoryService({
   queryAdminDb, getAdminDb, adjustBalanceById, recordTransactionById, fixImageUrl
 });
 const fairness = makeFairnessService({ queryAdminDb, getAdminDb });
+const wheel = require('./services/wheel').makeWheelService({ getAdminDb, queryAdminDb, fairness });
+const achievements = require('./services/achievements').makeAchievementsService({ getAdminDb, queryAdminDb });
 
 const battles = makeBattlesService({
   queryAdminDb, getAdminDb, getCaseItemsFromDb, getFallbackItems, fixImageUrl
@@ -1194,6 +1196,62 @@ require('./services/gameAccess').register({ app, queryAdminDb });
 const upgradeBattles = require('./services/upgradeBattles').makeUpgradeBattles({ getDb: getAdminDb });
 require('./services/upgradeBattleRoutes').register({ app, service: upgradeBattles });
 require('./services/wagerGuard').register({ app, deposits });
+
+// --- Колесо бонусов ----------------------------------------------------------
+// Гостю отдаём сектора без попыток: колесо должно быть видно до входа, иначе
+// незачем и заходить.
+const wheelUserId = req => (req.auth && !req.auth.mock ? Number(req.auth.sub) : null);
+app.get('/api/v1/wheel', async (req, res) => {
+  try { res.json({ status: 'success', data: await wheel.state(wheelUserId(req)) }); }
+  catch (e) { console.error('[Wheel state]', e.message);
+    res.status(503).json({ status: 'error', message: 'Колесо сейчас недоступно' }); }
+});
+app.get('/api/v1/wheel/history', async (req, res) => {
+  const id = wheelUserId(req);
+  if (!id) return res.json({ status: 'success', data: [] });
+  try { res.json({ status: 'success', data: await wheel.history(id) }); }
+  catch (e) { res.status(503).json({ status: 'error', message: 'История недоступна' }); }
+});
+// --- Достижения --------------------------------------------------------------
+// Прогресс не хранится, а считается из transactions и inventory, поэтому
+// пересчёт безопасно дёргать на каждом обращении: потерять его нельзя.
+app.get('/api/v1/achievements', async (req, res) => {
+  const id = wheelUserId(req);
+  try {
+    if (id) await achievements.evaluate(id);
+    res.json({ status: 'success', data: await achievements.list(id) });
+  } catch (e) {
+    console.error('[Achievements list]', e.message);
+    res.status(503).json({ status: 'error', message: 'Достижения сейчас недоступны' });
+  }
+});
+
+// Что показать всплывающим уведомлением. Отдаётся один раз: после выдачи
+// достижение помечается показанным, иначе игрок видел бы его при каждом опросе.
+app.get('/api/v1/achievements/pending', async (req, res) => {
+  const id = wheelUserId(req);
+  if (!id) return res.json({ status: 'success', data: [] });
+  try {
+    await achievements.evaluate(id);
+    res.json({ status: 'success', data: await achievements.pending(id) });
+  } catch (e) {
+    console.error('[Achievements pending]', e.message);
+    res.json({ status: 'success', data: [] });
+  }
+});
+
+app.post('/api/v1/wheel/spin', async (req, res) => {
+  try {
+    const data = await wheel.spin(wheelUserId(req), String(req.body?.requestId || ''));
+    res.json({ status: 'success', data });
+  } catch (e) {
+    const status = e.status || 503;
+    if (status >= 500) console.error('[Wheel spin]', e.message);
+    res.status(status).json({ status: 'error', code: e.code || 'WHEEL_ERROR',
+      message: status >= 500 ? 'Не удалось прокрутить колесо. Попытка не потрачена.' : e.message });
+  }
+});
+
 app.post(['/api/v1/cases/open', '/api/v1/cases/:slug/open'], async (req, res) => {
   try {
     const slug = req.body?.slug || req.params.slug || 'limit';
@@ -1217,9 +1275,21 @@ app.post(['/api/v1/cases/open', '/api/v1/cases/:slug/open'], async (req, res) =>
     }
     const casePrice = Math.round(Number(c.price) * 100) / 100;
     if (!Number.isFinite(casePrice) || casePrice < 0) return res.status(409).json({status:'error',code:'CASE_MISCONFIGURED',message:'Некорректная цена кейса'});
-    const totalCost = Math.round(casePrice * 100) * quantity / 100;
 
     const user = (await currentUser(req, mockUser)) || guestUser();
+
+    // Скидка с колеса. Действует на ОДИН кейс в заказе: «−35% на кейс» — это
+    // про кейс, а не про корзину, и при x5 игрок не должен получать пять скидок.
+    // Сама скидка гасится внутри settleCase, вместе со списанием.
+    let discount = null;
+    if (user && !user.isGuest && req.auth && !req.auth.mock) {
+      try { discount = await wheel.bestDiscount(user.id, casePrice); }
+      catch (e) { console.error('[Wheel discount]', e.message); }
+    }
+    const discountCents = discount
+      ? Math.min(Math.round(casePrice * 100), Math.round(casePrice * 100 * discount.percent / 100))
+      : 0;
+    const totalCost = (Math.round(casePrice * 100) * quantity - discountCents) / 100;
 
     const items = await getCaseItemsFromDb(c ? c.id : null);
     const drops = [];
@@ -1295,7 +1365,8 @@ app.post(['/api/v1/cases/open', '/api/v1/cases/:slug/open'], async (req, res) =>
     // Списание, предметы и запись истории — одна SQLite-транзакция. Раньше
     // сбой на втором или последующем предмете оставлял игрока без денег.
     const settlement = await inventory.settleCase(user.id, {
-      cost: totalCost, drops, ref: c ? c.name : slug
+      cost: totalCost, drops, ref: c ? c.name : slug,
+      discountId: discount ? discount.id : null
     });
     const winnings = settlement.winnings;
     balanceAfter = settlement.balance;
