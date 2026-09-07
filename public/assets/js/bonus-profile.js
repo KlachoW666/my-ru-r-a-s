@@ -59,20 +59,21 @@ const STYLE = `
 .bz-sec__n{font-size:11px;font-weight:800;opacity:.65;font-variant-numeric:tabular-nums}
 .bz-sec--on .bz-sec__n{opacity:.9}
 .bz-sec__dot{width:6px;height:6px;border-radius:50%;background:#f36a21;box-shadow:0 0 0 3px rgba(243,106,33,.2)}
-.bz-panel__grid{display:grid;grid-template-columns:repeat(auto-fill,minmax(220px,1fr));gap:10px}
-.bz-panel__card{position:relative;padding:13px;border:1px solid rgba(255,255,255,.07);border-radius:12px;
-  background:rgba(255,255,255,.02)}
-.bz-panel__card--done{border-color:rgba(243,106,33,.4);background:rgba(243,106,33,.06)}
-.bz-panel__tick{position:absolute;top:11px;right:12px;color:#f36a21;font-size:13px;font-weight:800}
-.bz-panel__name{font-weight:700;font-size:13px;padding-right:18px}
-.bz-panel__reward{margin-top:3px;font-size:11px;color:#f2c94c}
-.bz-panel__bar{margin-top:9px;height:4px;border-radius:2px;background:rgba(255,255,255,.08);overflow:hidden}
-.bz-panel__fill{height:100%;background:#f36a21;border-radius:2px;transition:width .4s}
-.bz-panel__num{margin-top:5px;font-size:11px;opacity:.45}
-.bz-panel__get{margin-top:9px;width:100%;padding:7px;border:0;border-radius:8px;background:#f36a21;color:#150d08;
-  font-weight:800;font-size:12px;cursor:pointer}
-.bz-panel__get:disabled{opacity:.5;cursor:default}
-.bz-panel__done{margin-top:9px;font-size:11px;color:#6fcf97}
+/* Таблица берёт классы у истории игр; здесь только содержимое ячеек. */
+.bz-table{overflow-x:auto}
+.bz-table table{width:100%;border-collapse:collapse}
+.bz-row__name{font-weight:700;font-size:13px}
+.bz-row__tick{margin-left:8px;color:#f36a21;font-weight:800}
+.bz-row__bar{width:130px;max-width:100%;height:4px;border-radius:2px;background:rgba(255,255,255,.08);overflow:hidden}
+.bz-row__fill{height:100%;background:#f36a21;border-radius:2px;transition:width .4s}
+.bz-row__num{display:inline-block;margin-top:5px;font-size:11px;opacity:.5;white-space:nowrap}
+.bz-row__reward{font-size:12px;color:#f2c94c}
+.bz-row__get{padding:7px 16px;border:0;border-radius:8px;background:#f36a21;color:#150d08;
+  font-weight:800;font-size:12px;cursor:pointer;white-space:nowrap}
+.bz-row__get:disabled{opacity:.5;cursor:default}
+.bz-row__done{font-size:12px;color:#6fcf97;white-space:nowrap}
+.bz-row__wait{opacity:.3}
+.bz-table tr[data-done="1"] .bz-row__name{color:#fff}
 .bz-panel__wheel{display:flex;align-items:center;gap:20px;flex-wrap:wrap;padding:6px 0}
 .bz-panel__big{font-size:30px;font-weight:800;line-height:1}
 .bz-panel__muted{font-size:12px;opacity:.6;line-height:1.55}
@@ -193,24 +194,38 @@ function tabClass(buttons) {
 
 // --- Содержимое панелей ------------------------------------------------------
 
-const cardHtml = i => `
-  <div class="bz-panel__card${i.unlocked ? ' bz-panel__card--done' : ''}">
-    ${i.unlocked ? '<span class="bz-panel__tick">✓</span>' : ''}
-    <div class="bz-panel__name">${esc(i.title)}</div>
-    <div class="bz-panel__reward">${esc(i.rewardText)}</div>
-    <div class="bz-panel__bar"><div class="bz-panel__fill" style="width:${i.percent}%"></div></div>
-    <div class="bz-panel__num">${money(i.progress)} / ${money(i.threshold)}</div>
-    ${i.claimable ? `<button class="bz-panel__get" type="button" data-claim="${esc(i.code)}">Получить</button>`
-      : i.claimed ? `<div class="bz-panel__done">Награда получена</div>` : ''}
-  </div>`;
+/**
+ * Снимает оформление с настоящей таблицы истории игр.
+ *
+ * Свою вёрстку тут писать нельзя: список достижений должен выглядеть ровно
+ * как история открытий, а её классы генерируются сборщиком и меняются. Поэтому
+ * классы копируются с живых узлов таблицы. Таблицы нет — вернём null, и список
+ * отрисуется на своём скромном оформлении.
+ */
+function tableSkin(scope) {
+  const table = scope?.querySelector('table');
+  if (!table) return null;
+  const thead = table.querySelector('thead');
+  const tbody = table.querySelector('tbody');
+  return {
+    table: table.className,
+    thead: thead?.className || '',
+    headRow: thead?.querySelector('tr')?.className || '',
+    th: thead?.querySelector('th')?.className || '',
+    tbody: tbody?.className || '',
+    tr: tbody?.querySelector('tr')?.className || '',
+    td: tbody?.querySelector('td')?.className || ''
+  };
+}
 
 /**
- * Достижения разбиты на разделы. Показывается один раздел за раз — иначе
- * тридцать карточек одной простынёй, и найти в них что-то нельзя.
- * Раздел с невзятой наградой помечается точкой, чтобы её было видно, не
- * перебирая вкладки.
+ * Достижения одного раздела — списком, в оформлении таблицы истории.
+ *
+ * Разделы переключаются кнопками: тридцать строк одной простынёй читать
+ * невозможно. Точка на кнопке отмечает раздел с неполученной наградой, чтобы
+ * её было видно, не перебирая разделы.
  */
-function achievementsHtml(data, section) {
+function achievementsHtml(data, section, skin) {
   const groups = [...new Set(data.items.map(i => i.group))];
   const shown = groups.includes(section) ? section : groups[0];
   const inGroup = g => data.items.filter(i => i.group === g);
@@ -224,9 +239,34 @@ function achievementsHtml(data, section) {
       ${wait ? '<span class="bz-sec__dot" title="Есть неполученная награда"></span>' : ''}</button>`;
   }).join('');
 
+  const s = skin || {};
+  const cls = v => v ? ` class="${v}"` : '';
+  const head = ['ДОСТИЖЕНИЕ', 'ПРОГРЕСС', 'НАГРАДА', '']
+    .map(t => `<th${cls(s.th)}>${t}</th>`).join('');
+
+  const rows = inGroup(shown).map(i => `
+    <tr${cls(s.tr)} data-done="${i.unlocked ? '1' : '0'}">
+      <td${cls(s.td)}>
+        <span class="bz-row__name">${esc(i.title)}</span>
+        ${i.unlocked ? '<span class="bz-row__tick">✓</span>' : ''}
+      </td>
+      <td${cls(s.td)}>
+        <div class="bz-row__bar"><div class="bz-row__fill" style="width:${i.percent}%"></div></div>
+        <span class="bz-row__num">${money(i.progress)} / ${money(i.threshold)}</span>
+      </td>
+      <td${cls(s.td)}><span class="bz-row__reward">${esc(i.rewardText)}</span></td>
+      <td${cls(s.td)}>${
+        i.claimable ? `<button class="bz-row__get" type="button" data-claim="${esc(i.code)}">Получить</button>`
+        : i.claimed ? '<span class="bz-row__done">Получено</span>'
+        : '<span class="bz-row__wait">—</span>'}</td>
+    </tr>`).join('');
+
   return `<div class="bz-panel">
     <div class="bz-sections">${nav}</div>
-    <div class="bz-panel__grid">${inGroup(shown).map(cardHtml).join('')}</div>
+    <div class="bz-table"><table${cls(s.table)}>
+      <thead${cls(s.thead)}><tr${cls(s.headRow)}>${head}</tr></thead>
+      <tbody${cls(s.tbody)}>${rows}</tbody>
+    </table></div>
   </div>`;
 }
 
@@ -274,19 +314,36 @@ export async function mountProfile() {
 
   let panel = null, state = null, data = null, active = null, section = null;
 
-  // Всё, что идёт после строки вкладок внутри карточки, — это таблица истории.
-  const host = strip.closest('div');
-  const hideable = () => {
-    const card = host?.parentElement;
-    if (!card) return [];
-    return [...card.children].filter(el => el !== host && !el.contains(strip) && el !== panel);
-  };
+
+  /*
+   * Карточка — ближайший предок, внутри которого лежит и строка вкладок, и
+   * сама таблица истории. Брать parentElement строки нельзя: она обычно живёт
+   * в шапке рядом с заголовком, и таблица туда не входит — панель тогда
+   * вставлялась в шапку, а таблица оставалась на виду.
+   */
+  const card = (() => {
+    let node = strip;
+    while (node.parentElement && node.parentElement !== document.body) {
+      node = node.parentElement;
+      if (node.querySelector('table')) return node;
+    }
+    return strip.parentElement;
+  })();
+  // Прямой потомок карточки, внутри которого лежит строка вкладок: после него
+  // и встаёт панель, чтобы вкладки остались сверху.
+  const headerRow = [...card.children].find(el => el.contains(strip)) || strip;
+
+  // Оформление снимаем ДО скрытия таблицы: у скрытого узла классы читаются,
+  // но панель к этому моменту уже должна быть нарисована.
+  const skin = tableSkin(card);
+
+  const hideable = () => [...card.children].filter(el => el !== headerRow && el !== panel);
 
   function showPanel(html) {
     if (!panel) {
       panel = document.createElement('div');
       panel.dataset.bzPanel = '1';
-      host.parentElement.insertBefore(panel, host.nextSibling);
+      card.insertBefore(panel, headerRow.nextSibling);
     }
     panel.innerHTML = html;
     hideable().forEach(el => { el.dataset.bzHidden = '1'; el.style.display = 'none'; });
@@ -314,7 +371,7 @@ export async function mountProfile() {
         go.addEventListener('click', () => openWheel(state, next => { state = next; refresh(); }));
       }
     } else if (active === 'ach') {
-      showPanel(data ? achievementsHtml(data, section)
+      showPanel(data ? achievementsHtml(data, section, skin)
         : '<div class="bz-panel bz-panel__muted">Достижения недоступны</div>');
       panel.querySelectorAll('[data-section]').forEach(btn => btn.addEventListener('click', () => {
         section = btn.dataset.section;
