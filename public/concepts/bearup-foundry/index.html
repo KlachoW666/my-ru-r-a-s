@@ -1,0 +1,40 @@
+<!doctype html>
+<html lang="ru">
+<head>
+<meta charset="UTF-8"><meta name="viewport" content="width=device-width, initial-scale=1">
+<meta name="robots" content="noindex,nofollow">
+<title>BEARUP — концепт «Мастерская»</title>
+<link rel="stylesheet" href="/assets/css/satchel-theme.css">
+<link rel="stylesheet" href="./style.css">
+</head>
+<body>
+<div class="preview-bar"><span>BEARUP / DESIGN STUDY 01</span><span>Интерактивный концепт · все данные демонстрационные</span><a href="#catalog">Смотреть каталог ↗</a></div>
+<header class="header wrap">
+  <a class="brand" href="./"><img src="/image/icon-logo.png" alt=""><span>BEAR<span class="accent">UP</span><small>RUST CASE WORKSHOP</small></span></a>
+  <nav aria-label="Главное меню"><a href="#catalog" class="active">Кейсы</a><button data-mode="Батлы">Батлы <span class="nav-tag">2 режима</span></button><button data-mode="Апгрейд">Апгрейд</button><button data-mode="Розыгрыши">Розыгрыши</button></nav>
+  <div class="account"><span class="balance"><small>Баланс · демо</small>4 280,00 <img src="/image/icon-money.png" alt="монет"></span><button class="primary compact" data-info="Кошелёк">Пополнить <span>＋</span></button><button class="avatar" data-info="Профиль" aria-label="Профиль">М</button></div>
+</header>
+<main class="wrap">
+  <section class="feed" aria-label="Пример ленты выигрышей"><div class="feed-label"><span class="live-dot"></span><b>Лента дропов</b><small>ПРЕВЬЮ</small></div><div class="feed-items" id="feed"></div><button class="feed-next" aria-label="Прокрутить ленту">→</button></section>
+  <section class="hero">
+    <img class="hero-art" src="/image/bear-gunsmith-banner-1470x630.png" alt="Медведь-мастер за верстаком в мастерской Rust">
+    <div class="hero-shade"></div>
+    <div class="hero-copy"><div class="eyebrow"><span></span> СОБРАНО В МАСТЕРСКОЙ BEARUP</div><h1>ХОРОШИЙ ЛУТ.<br><em>МЕДВЕЖИЙ ХАРАКТЕР.</em></h1><p>От первого костра до большого рейда.<br>Выбирай свой кейс — история начинается здесь.</p><a href="#catalog" class="primary">В мастерскую <span>↗</span></a><div class="hero-bottom"><span>01 — КОЛЛЕКЦИЯ СЕНТЯБРЯ</span><div class="marks"><i></i><i></i><i></i></div></div></div>
+    <span class="hero-stamp">BU / WORKSHOP<br>EST. 2026</span>
+  </section>
+  <section class="rewards" aria-label="Награды за депозит">
+    <div class="reward-heading"><span class="eyebrow">ТВОЙ СЛЕДУЮЩИЙ ШАГ</span><h2>Путь медведя</h2><p>Пополняй баланс. Открывай награды.</p><button class="text-button" data-info="Как работает путь медведя">Как это работает ↗</button></div>
+    <div class="reward-track" id="rewards"></div>
+    <div class="next-reward"><small>До следующей награды</small><strong>126 <span>монет</span></strong><div class="progress"><i></i></div><span class="progress-caption">174 из 300 · демопрогресс</span></div>
+  </section>
+  <section id="catalog" class="catalog">
+    <div class="section-head"><div><span class="eyebrow">ВЫБЕРИ СВОЙ ХАРАКТЕР</span><h2>Кейсы мастерской<span class="count">08</span></h2></div><div class="catalog-tools"><label class="search"><span>⌕</span><input id="search" type="search" placeholder="Найти кейс" aria-label="Найти кейс"></label><label><span class="sr-only">Сортировка</span><select id="sort"><option value="featured">Рекомендованные</option><option value="asc">Сначала дешевле</option><option value="desc">Сначала дороже</option></select></label></div></div>
+    <div class="filters" aria-label="Серии кейсов"><button class="selected" data-filter="all" aria-pressed="true">Все кейсы <span>08</span></button><button data-filter="start" aria-pressed="false">Для старта</button><button data-filter="raid" aria-pressed="false">На рейд</button><button data-filter="collection" aria-pressed="false">Коллекционные</button><button class="favorites" data-filter="favorites" aria-pressed="false">♡ Избранное</button></div>
+    <div class="case-grid" id="cases"></div><p id="empty" hidden>Кейсов не найдено. Попробуй другую серию или название.</p>
+  </section>
+  <section class="modes"><button class="mode-card" data-mode="Батлы"><span class="eyebrow">01 / АРЕНА</span><div><h2>Два игрока.<br>Один победитель.</h2><span class="mode-icon">⚔</span></div><p>Батлы на кейсах и апгрейдах <span>↗</span></p></button><button class="mode-card upgrade" data-mode="Апгрейд"><span class="eyebrow">02 / ВЕРСТАК</span><div><h2>Следующий уровень<br>твоего инвентаря.</h2><span class="mode-icon">↑</span></div><p>Заглянуть в апгрейд <span>↗</span></p></button></section>
+  <footer><span class="brand-word">BEARUP<span>®</span></span><p>Концепт «Мастерская». Цены, дропы и прогресс — примеры.<br>Оплата и игры не подключены. 18+</p><span>СДЕЛАНО С ХАРАКТЕРОМ ↗</span></footer>
+</main>
+<dialog id="detail" aria-labelledby="detail-title"><button class="close" aria-label="Закрыть">×</button><span class="eyebrow">BEARUP / ПРЕВЬЮ</span><h2 id="detail-title"></h2><div id="detail-body"></div><button class="primary close-action">Вернуться в мастерскую <span>↗</span></button></dialog>
+<script src="./app.js"></script>
+</body></html>
