@@ -13,14 +13,20 @@
  *
  * Здесь прогресс выводится из источника: несколько агрегирующих запросов на
  * весь список. Значит его нельзя потерять и можно пересчитать в любой момент.
- * Хранится только ФАКТ выдачи (user_achievements) — потому что бонус выдаётся
- * один раз, и вот это забывать нельзя.
+ * Хранится только ФАКТ открытия и получения (user_achievements) — потому что
+ * бонус выдаётся один раз, и вот это забывать нельзя.
+ *
+ * НАГРАДУ ЗАБИРАЕТ ИГРОК, А НЕ СИСТЕМА
+ *
+ * evaluate() только открывает достижение. Бонус начисляет claim() по нажатию
+ * «Получить» — в уведомлении или позже в профиле. Так награда не пропадёт
+ * незамеченной: закрыл уведомление — она осталась ждать в профиле.
  *
  * ИДЕМПОТЕНТНОСТЬ
  *
- * Ключ (user_id, achievement_id) уникален. Бонус начисляется ТОЛЬКО если
- * вставка реально создала строку (changes === 1). Два параллельных запроса
- * дадут одну строку и один бонус, а не два.
+ * Ключ (user_id, code) уникален, поэтому достижение открывается один раз.
+ * Награда начисляется под условием claimed_at IS NULL с проверкой changes:
+ * два параллельных нажатия «Получить» дадут один бонус, а не два.
  */
 
 const { transaction } = require('./sqliteTransaction');
@@ -123,7 +129,10 @@ function makeAchievementsService({ getAdminDb, queryAdminDb }) {
         reward_kind TEXT,
         reward_value REAL,
         notified_at TEXT,
+        claimed_at TEXT,
         PRIMARY KEY (user_id, code))`);
+      // База могла быть создана до появления кнопки «Получить».
+      await run('ALTER TABLE user_achievements ADD COLUMN claimed_at TEXT').catch(() => {});
       await run(`CREATE TABLE IF NOT EXISTS transactions (
         id INTEGER PRIMARY KEY AUTOINCREMENT, user_id INTEGER, type TEXT,
         amount REAL, comment TEXT, created_at TEXT DEFAULT CURRENT_TIMESTAMP)`);
@@ -183,8 +192,11 @@ function makeAchievementsService({ getAdminDb, queryAdminDb }) {
   }
 
   /**
-   * Пересчитать прогресс и выдать всё, что заслужено.
-   * Возвращает список ТОЛЬКО что открытых — их и показываем уведомлением.
+   * Пересчитать прогресс и отметить всё, что заслужено.
+   *
+   * Награда здесь НЕ начисляется — только открывается достижение. Забирает её
+   * игрок кнопкой «Получить», в уведомлении или позже в профиле. Так награда
+   * не пропадёт незамеченной: закрыл уведомление — она осталась ждать.
    */
   async function evaluate(userId) {
     if (!userId) return { unlocked: [], metrics: {} };
@@ -199,12 +211,10 @@ function makeAchievementsService({ getAdminDb, queryAdminDb }) {
     for (const a of due) {
       try {
         await transaction(getAdminDb, async tx => {
-          // Бонус начисляется ТОЛЬКО если строка действительно создана здесь.
           const ins = await tx.run(
             `INSERT OR IGNORE INTO user_achievements (user_id, code, reward_kind, reward_value)
              VALUES (?, ?, ?, ?)`, [userId, a.code, a.reward.kind, a.reward.value]);
           if (ins.changes !== 1) return;
-          await grant(tx, userId, { ...a.reward, code: a.code });
           unlocked.push({ code: a.code, title: a.title, group: a.group,
             reward: a.reward, rewardText: rewardText(a.reward) });
         });
@@ -215,25 +225,62 @@ function makeAchievementsService({ getAdminDb, queryAdminDb }) {
     return { unlocked, metrics: m };
   }
 
+  /**
+   * Забрать награду за открытое достижение.
+   *
+   * Начисление и отметка «получено» — одна транзакция с условием
+   * claimed_at IS NULL. Два параллельных нажатия дадут один бонус: второе
+   * увидит changes = 0 и ничего не начислит.
+   */
+  async function claim(userId, code) {
+    if (!userId) throw Object.assign(new Error('Нужно войти в аккаунт'), { status: 401 });
+    const a = CATALOG.find(x => x.code === code);
+    if (!a) throw Object.assign(new Error('Достижение не найдено'), { status: 404 });
+    await ensureSchema();
+
+    return transaction(getAdminDb, async tx => {
+      const row = await tx.get(
+        'SELECT claimed_at FROM user_achievements WHERE user_id = ? AND code = ?', [userId, code]);
+      if (!row) throw Object.assign(new Error('Достижение ещё не открыто'), { status: 409, code: 'NOT_UNLOCKED' });
+      if (row.claimed_at) throw Object.assign(new Error('Награда уже получена'), { status: 409, code: 'ALREADY_CLAIMED' });
+
+      const taken = await tx.run(
+        `UPDATE user_achievements SET claimed_at = CURRENT_TIMESTAMP
+         WHERE user_id = ? AND code = ? AND claimed_at IS NULL`, [userId, code]);
+      if (taken.changes !== 1) {
+        throw Object.assign(new Error('Награда уже получена'), { status: 409, code: 'ALREADY_CLAIMED' });
+      }
+      await grant(tx, userId, { ...a.reward, code: a.code });
+      const balance = await tx.get('SELECT balance FROM users WHERE id = ?', [userId]);
+      return { code: a.code, title: a.title, reward: a.reward, rewardText: rewardText(a.reward),
+        balance: Number(balance?.balance) || 0 };
+    });
+  }
+
   /** Список для профиля: что получено, что в процессе. */
   async function list(userId) {
     await ensureSchema();
     const m = userId ? await metrics(userId) : {};
     const rows = userId
-      ? await queryAdminDb('SELECT code, unlocked_at FROM user_achievements WHERE user_id = ?', [userId])
+      ? await queryAdminDb('SELECT code, unlocked_at, claimed_at FROM user_achievements WHERE user_id = ?', [userId])
       : [];
-    const done = new Map((rows.failed ? [] : rows).map(r => [r.code, r.unlocked_at]));
+    const done = new Map((rows.failed ? [] : rows).map(r => [r.code, r]));
     const items = CATALOG.map(a => {
       const value = Number(m[a.metric]) || 0;
+      const row = done.get(a.code);
       return {
         code: a.code, title: a.title, group: a.group, metric: a.metric,
         threshold: a.threshold, progress: Math.min(value, a.threshold),
         percent: Math.min(100, Math.round(value / a.threshold * 100)),
-        unlocked: done.has(a.code), unlockedAt: done.get(a.code) || null,
+        unlocked: Boolean(row), unlockedAt: row?.unlocked_at || null,
+        claimed: Boolean(row?.claimed_at),
+        claimable: Boolean(row) && !row.claimed_at,
         rewardText: rewardText(a.reward)
       };
     });
-    return { items, total: items.length, unlocked: items.filter(i => i.unlocked).length };
+    return { items, total: items.length,
+      unlocked: items.filter(i => i.unlocked).length,
+      claimable: items.filter(i => i.claimable).length };
   }
 
   /** Уведомления, которые игрок ещё не видел. Помечаются показанными. */
@@ -258,7 +305,7 @@ function makeAchievementsService({ getAdminDb, queryAdminDb }) {
     return out;
   }
 
-  return { ensureSchema, evaluate, list, pending, metrics, CATALOG, METRICS, rewardText };
+  return { ensureSchema, evaluate, claim, list, pending, metrics, CATALOG, METRICS, rewardText };
 }
 
 module.exports = { makeAchievementsService, CATALOG, METRICS, rewardText };

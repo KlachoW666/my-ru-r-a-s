@@ -64,23 +64,51 @@ test('AC2 при нулевом прогрессе ничего не выдаё�
   assert.equal((await all('SELECT code FROM user_achievements')).length, 0);
 });
 
-test('AC3 открытие кейса даёт «Первый кейс» и рубли на счёт', async t => {
+test('AC3 открытие кейса открывает достижение, но НЕ начисляет само', async t => {
   const { service, run, all } = await fixture(t);
   await run("INSERT INTO transactions(user_id,type,amount,comment) VALUES(1,'case_open',-100,'Открытие: Кейс x1')");
   const { unlocked } = await service.evaluate(1);
-  const codes = unlocked.map(u => u.code);
-  assert.ok(codes.includes('case_1'), 'должно открыться «Первый кейс»');
-  const balance = (await all('SELECT balance FROM users WHERE id=1'))[0].balance;
-  assert.equal(balance, 10, 'бонус 10 ₽ начислен');
+  assert.ok(unlocked.map(u => u.code).includes('case_1'), 'должно открыться «Первый кейс»');
+  assert.equal((await all('SELECT balance FROM users WHERE id=1'))[0].balance, 0,
+    'до нажатия «Получить» баланс не трогается');
+
+  const claimed = await service.claim(1, 'case_1');
+  assert.equal(claimed.reward.value, 10);
+  assert.equal((await all('SELECT balance FROM users WHERE id=1'))[0].balance, 10);
   const tx = await all("SELECT type,amount FROM transactions WHERE type='achievement'");
-  assert.equal(tx.length, 1);
-  assert.equal(tx[0].amount, 10);
+  assert.deepEqual(tx.map(x => x.amount), [10]);
 });
 
-test('AC4 повторный пересчёт не выдаёт награду второй раз', async t => {
+test('AC3b награду нельзя забрать дважды', async t => {
   const { service, run, all } = await fixture(t);
   await run("INSERT INTO transactions(user_id,type,amount,comment) VALUES(1,'case_open',-100,'Открытие: Кейс x1')");
   await service.evaluate(1);
+  await service.claim(1, 'case_1');
+  await assert.rejects(() => service.claim(1, 'case_1'), e => e.code === 'ALREADY_CLAIMED');
+  assert.equal((await all('SELECT balance FROM users WHERE id=1'))[0].balance, 10, 'бонус остался один');
+});
+
+test('AC3c неоткрытое достижение забрать нельзя', async t => {
+  const { service, all } = await fixture(t);
+  await assert.rejects(() => service.claim(1, 'case_1'), e => e.code === 'NOT_UNLOCKED');
+  assert.equal((await all('SELECT balance FROM users WHERE id=1'))[0].balance, 0);
+});
+
+test('AC3d закрытое уведомление не теряет награду — она ждёт в профиле', async t => {
+  const { service, run } = await fixture(t);
+  await run("INSERT INTO transactions(user_id,type,amount,comment) VALUES(1,'case_open',-100,'Открытие: Кейс x1')");
+  await service.evaluate(1);
+  await service.pending(1);                       // уведомление показано и закрыто
+  const { items, claimable } = await service.list(1);
+  assert.ok(claimable >= 1, 'награда осталась доступной');
+  assert.equal(items.find(i => i.code === 'case_1').claimable, true);
+});
+
+test('AC4 повторный пересчёт не открывает достижение заново', async t => {
+  const { service, run, all } = await fixture(t);
+  await run("INSERT INTO transactions(user_id,type,amount,comment) VALUES(1,'case_open',-100,'Открытие: Кейс x1')");
+  await service.evaluate(1);
+  await service.claim(1, 'case_1');
   const after = (await all('SELECT balance FROM users WHERE id=1'))[0].balance;
   await service.evaluate(1);
   await service.evaluate(1);
@@ -105,6 +133,7 @@ test('AC6 награда-прокрут кладётся в журнал поп�
   await run("INSERT INTO transactions(user_id,type,amount,comment) VALUES(1,'deposit',500,'test')");
   const { unlocked } = await service.evaluate(1);
   assert.ok(unlocked.map(u => u.code).includes('dep_first'));
+  await service.claim(1, 'dep_first');
   const spins = await all("SELECT kind FROM wheel_spins WHERE kind='achievement'");
   assert.equal(spins.length, 1);
 });
@@ -113,6 +142,7 @@ test('AC7 награда-скидка создаёт скидку с порог�
   const { service, run, all } = await fixture(t);
   await run("INSERT INTO transactions(user_id,type,amount,comment) VALUES(1,'deposit',10000,'test')");
   await service.evaluate(1);
+  await service.claim(1, 'dep_10k');
   const rows = await all("SELECT percent,max_case_price,expires_at FROM case_discounts WHERE source='achievement'");
   assert.ok(rows.length >= 1, 'дошли до «Десятка» — должна быть скидка');
   assert.equal(rows[0].percent, 35);

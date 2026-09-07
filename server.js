@@ -1240,6 +1240,20 @@ app.get('/api/v1/achievements/pending', async (req, res) => {
   }
 });
 
+// Забрать награду. Отдельным действием, а не автоматически: игрок должен
+// увидеть, что получил, иначе бонус проходит мимо него незамеченным.
+app.post('/api/v1/achievements/:code/claim', async (req, res) => {
+  try {
+    const data = await achievements.claim(wheelUserId(req), String(req.params.code || ''));
+    res.json({ status: 'success', data });
+  } catch (e) {
+    const status = e.status || 503;
+    if (status >= 500) console.error('[Achievements claim]', e.message);
+    res.status(status).json({ status: 'error', code: e.code || 'CLAIM_FAILED',
+      message: status >= 500 ? 'Не удалось получить награду. Попробуйте ещё раз.' : e.message });
+  }
+});
+
 app.post('/api/v1/wheel/spin', async (req, res) => {
   try {
     const data = await wheel.spin(wheelUserId(req), String(req.body?.requestId || ''));
