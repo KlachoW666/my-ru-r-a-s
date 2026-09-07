@@ -1,4 +1,14 @@
 /* Bonus surfaces share BEARZ tokens, including portals outside .bearz-shell. */
+.pf-history .pf-hist-tabs{width:auto!important;max-width:100%;display:flex!important;flex-wrap:wrap;gap:8px}
+.pf-history .pf-hist-tabs .pf-tab{width:auto!important;flex:0 0 auto!important;min-width:112px;max-width:none!important;padding:12px 18px!important;overflow:visible!important;white-space:nowrap}
+.bz-history-scroll{overflow-x:auto}
+.bz-history-table{min-width:640px;display:grid;gap:6px}
+.bz-history-row{display:grid;grid-template-columns:1.2fr 1fr 1.2fr .7fr;align-items:center;gap:24px;padding:20px 24px;background:var(--bg-control);border-radius:12px;min-height:76px}
+.bz-history-row strong{font-size:14px;color:var(--text-main)}
+.bz-history-row small{display:block;font-size:12px;color:var(--text-soft);margin-top:6px}
+.bz-history-row .bz-ach-progress{margin:0;height:5px;max-width:180px}
+.bz-history-reward{font-size:14px;color:var(--sat-brass);font-weight:600}
+.bz-history-head{background:none;min-height:36px;padding-block:8px;font-size:10px;color:var(--text-soft)}
 .pf-history:has(>[data-bz-panel]){display:block!important}
 .pf-history:has(>[data-bz-panel])>:not(.pf-hist-head):not([data-bz-panel]){display:none!important}
 .bz-ach-heading{display:flex;align-items:center;justify-content:space-between;gap:24px;margin-bottom:28px}

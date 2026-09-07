@@ -244,23 +244,18 @@ function achievementsHtml(data, section, skin) {
       ${wait ? '<span class="bz-sec__dot" title="Есть неполученная награда"></span>' : ''}</button>`;
   }).join('');
 
-  const cards = inGroup(shown).map(i => {
+  const rows = inGroup(shown).map(i => {
     const percent = Math.max(0, Math.min(100, Number(i.percent) || 0));
-    return `<article class="bz-ach-card ${i.claimable ? 'bz-ach-card--ready' : ''}">
-      <div class="bz-ach-card__top"><span class="bz-ach-emblem" aria-hidden="true">${i.claimed ? '✓' : i.claimable ? '★' : '◇'}</span>
-      <span class="bz-ach-status">${i.claimed ? 'Получено' : i.claimable ? 'Награда доступна' : 'В процессе'}</span></div>
-      <h3>${esc(i.title)}</h3>
-      <p class="bz-panel__muted">${esc(shown)} · ${money(i.progress)} из ${money(i.threshold)}</p>
-      <div class="bz-ach-progress" role="progressbar" aria-label="${esc(i.title)}" aria-valuemin="0" aria-valuemax="100" aria-valuenow="${percent}"><span style="width:${percent}%"></span></div>
-      <div class="bz-ach-card__bottom"><div><small>НАГРАДА</small><strong>${esc(i.rewardText)}</strong></div>
-      ${i.claimable ? `<button class="bz-row__get" type="button" data-claim="${esc(i.code)}">Получить</button>` : `<span class="bz-ach-status">${i.claimed ? '✓' : percent + '%'}</span>`}</div>
-    </article>`;
+    return `<div class="bz-history-row" role="row">
+      <div role="cell"><strong>${esc(i.title)}</strong><small>${esc(i.group)}</small></div>
+      <div role="cell"><div class="bz-ach-progress" role="progressbar" aria-label="${esc(i.title)}" aria-valuemin="0" aria-valuemax="100" aria-valuenow="${percent}"><span style="width:${percent}%"></span></div><small>${money(i.progress)} / ${money(i.threshold)}</small></div>
+      <div role="cell" class="bz-history-reward">${esc(i.rewardText)}</div>
+      <div role="cell">${i.claimable ? `<button class="bz-row__get" type="button" data-claim="${esc(i.code)}">Получить</button>` : `<span class="bz-ach-status">${i.claimed ? 'Получено' : 'В процессе'}</span>`}</div>
+    </div>`;
   }).join('');
-  return `<section class="bz-panel bz-achievements" aria-label="Достижения">
-    <div class="bz-ach-heading"><div><span class="bz-ach-kicker">BEARZ / ЛИЧНЫЙ ПРОГРЕСС</span><h2>Твои достижения</h2>
-    <p class="bz-panel__muted">Прогресс сохраняется автоматически. Доступные награды забирай здесь.</p></div>
-    <div class="bz-ach-summary"><strong>${Number(data.unlocked)||0}<small> / ${Number(data.total)||0}</small></strong><span>достижений открыто</span></div></div>
-    <div class="bz-sections">${nav}</div><div class="bz-ach-grid">${cards}</div></section>`;
+  return `<section class="bz-panel" aria-label="Достижения"><div class="bz-sections">${nav}</div>
+    <div class="bz-history-scroll"><div class="bz-history-table" role="table" aria-label="Прогресс достижений">
+    <div class="bz-history-row bz-history-head" role="row"><span role="columnheader">ДОСТИЖЕНИЕ</span><span role="columnheader">ПРОГРЕСС</span><span role="columnheader">НАГРАДА</span><span role="columnheader">СТАТУС</span></div>${rows}</div></div></section>`;
 }
 
 function wheelHtml(state) {
@@ -349,10 +344,7 @@ export async function mountProfile() {
   })();
 
   const hideable = () => {
-    if (!contentBlock) return [];
-    const after = [];
-    for (let el = contentBlock; el; el = el.nextElementSibling) if (el !== panel) after.push(el);
-    return after;
+    return [...card.children].filter(el => el !== panel && !el.contains(strip));
   };
 
   function showPanel(html) {
@@ -360,8 +352,7 @@ export async function mountProfile() {
       panel = document.createElement('div');
       panel.dataset.bzPanel = '1';
       panel.style.width = '100%';
-      if (contentBlock) contentBlock.parentElement.insertBefore(panel, contentBlock);
-      else card.appendChild(panel);
+      card.appendChild(panel);
     }
     panel.innerHTML = html;
     hideable().forEach(el => { el.dataset.bzHidden = '1'; el.style.display = 'none'; });
@@ -409,8 +400,10 @@ export async function mountProfile() {
 
   function labels() {
     const spins = state?.spins || 0;
-    mine[0].textContent = spins ? `Колесо удачи (${spins})` : 'Колесо удачи';
-    mine[1].textContent = data ? `Достижения (${data.unlocked}/${data.total})` : 'Достижения';
+    mine[0].textContent = 'Колесо удачи';
+    mine[0].title = `Доступно попыток: ${spins}`;
+    mine[1].textContent = 'Достижения';
+    mine[1].title = data ? `Открыто ${data.unlocked} из ${data.total}` : 'Достижения';
   }
 
   async function refresh() {

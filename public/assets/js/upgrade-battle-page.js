@@ -291,14 +291,22 @@ export const UpgradeBattlePage = defineComponent({
       const player = battle.players.find(p => p.slot === slot), shown = s.value.visibleRounds;
       const results = battle.rounds.filter(r => r.slot === slot && r.roundIndex < shown);
       const score = results.reduce((sum, r) => sum + Math.round(r.value * 100), 0) / 100;
-      return h('section', {class: 'ub-player ub-panel'}, [
+      const settled = battle.status === 'finished' && !s.value.playback;
+      const winner = settled && battle.pot > 0 && battle.winnerUserIds.some(id => String(id) === String(player?.userId));
+      return h('section', {class: `ub-player ub-panel ub-player-battle${settled ? winner ? ' is-winner' : ' is-loser' : ''}`}, [
+        h('div', {class:'ub-player-stage'}, [settled ? h('div',{class:'ub-finish-art'},[
+          h('img',{src:`/assets/battles/${winner ? 'winner' : 'loser'}-boar.png`,alt:'','aria-hidden':'true'}),
+          h('strong',null,winner ? battle.winnerUserIds.length > 1 ? 'Ничья — приз разделён' : 'Победа!' : battle.pot === 0 ? 'Нет успешных апгрейдов' : 'В этот раз без победы'),
+          h('span',null,`Выплата: ${money(player?.payout || 0)}`)
+        ]) : wheel(battle, slot)]),
+        h('div',{class:'ub-player-bar'},[
         player?.avatar && imageUrl(player.avatar) ? h('img', {class: 'ub-avatar', src: imageUrl(player.avatar), alt: ''}) : h('span', {class: 'ub-avatar', 'aria-hidden': 'true'}, '♙'),
         h('h2', null, player?.name || 'Место для соперника'),
-        wheel(battle, slot),
-        h('p', {class: 'ub-score'}, money(score)),
+        h('p', {class: 'ub-score',title:'Стоимость успешных апгрейдов'}, money(score))]),
         h('ol', {class: 'ub-results'}, battle.targets.map((target, index) => {
           const result = results.find(r => r.roundIndex === index);
           return h('li', {key: index, class: result?.won ? 'ub-result ub-won' : 'ub-result'}, [h('span', null, `Раунд ${index + 1}`),
+            result ? itemImage(target) : h('span',{class:'ub-result-placeholder','aria-hidden':'true'},'◇'),
             h('strong', null, result ? (result.won ? money(result.value) : 'Неудача') : 'Ожидание'),
             h('small', {class: 'ub-muted'}, target.name)]);
         })),
@@ -327,7 +335,7 @@ export const UpgradeBattlePage = defineComponent({
     function detail() {
       const battle = s.value.battle, shown = s.value.visibleRounds;
       const targetIndex = s.value.playback?.index ?? (battle.status === 'finished' ? 2 : 0);
-      return h('div', null, [h('div', {class: 'ub-toolbar'}, [
+      return h('div', {class:'ub-detail'}, [h('div', {class: 'ub-toolbar'}, [
         h('a', {class: 'ub-button', href: lobbyUrl}, '← К списку'), h('h1', null, 'Батл на апгрейдах'),
         h('span', {role: 'status'}, s.value.playback ? 'Показ раундов' : statusText(battle.status))]),
         h('p', {class: 'ub-muted'}, `Взнос: ${money(battle.entryPrice)} · RTP ${percent(battle.rtp)} · одинаковые цели для обоих`),
@@ -337,7 +345,7 @@ export const UpgradeBattlePage = defineComponent({
           battle.status === 'waiting' && !battle.viewerIsPlayer ? button(`Войти за ${money(battle.entryPrice)}`, paidAction(model.prepareJoin), s.value.busy, true) : null,
           battle.status === 'waiting' && battle.viewerIsCreator ? button('Отменить и вернуть взнос', model.prepareCancel, s.value.busy) : null
         ]), playerPanel(battle, 1)]),
-        battle.status === 'finished' && shown === 3 ? h('section', {class: 'ub-panel ub-outcome', role: 'status'}, [
+        battle.status === 'finished' && shown === 3 && !s.value.playback ? h('section', {class: 'ub-panel ub-outcome', role: 'status'}, [
           h('h2', null, battle.pot === 0 ? 'Нет успешных апгрейдов' : battle.winnerUserIds.length > 1 ? 'Ничья — приз разделён' : `Победитель: ${battle.players.find(p => p.userId === battle.winnerUserIds[0])?.name || '—'}`),
           h('p', null, `Общий приз: ${money(battle.pot)}. Выплаты уже сохранены сервером.`),
           button('Повторить анимацию', model.replay, !!s.value.playback),
