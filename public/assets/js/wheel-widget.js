@@ -85,11 +85,14 @@ function styles() {
   el.id = 'bz-wheel-style';
   el.textContent = STYLE;
   document.head.appendChild(el);
+  const link = document.createElement('link');
+  link.id = 'bz-bonus-theme'; link.rel = 'stylesheet'; link.href = '/assets/css/bonus-workshop.css';
+  document.head.appendChild(link);
 }
 
 /** Круглая метка колеса для свёрнутой кнопки. */
 function markSvg() {
-  const slices = ['#f36a21', '#f2c94c', '#6fcf97', '#56ccf2', '#bb6bd9', '#eb5757']
+  const slices = ['var(--accent-primary)', 'var(--sat-brass)', 'var(--bg-control)', 'var(--sat-brass)', 'var(--bg-control)', 'var(--accent-primary)']
     .map((c, i) => `<path d="${wedge(50, 50, 46, i * 60, (i + 1) * 60)}" fill="${c}"/>`).join('');
   return `<svg viewBox="0 0 100 100" aria-hidden="true">${slices}
     <circle cx="50" cy="50" r="16" fill="#151110"/><circle cx="50" cy="50" r="46" fill="none"
@@ -140,9 +143,11 @@ export const wheelState = () => api('');
  */
 export function openWheel(state, onChange = () => {}) {
   styles();
+  if (document.querySelector('.bz-wheel__sheet')) return;
+  const previousFocus = document.activeElement;
   const sheet = document.createElement('div');
   sheet.className = 'bz-wheel__sheet';
-  sheet.innerHTML = `<div class="bz-wheel__card" role="dialog" aria-label="Колесо бонусов">
+  sheet.innerHTML = `<div class="bz-wheel__card" role="dialog" aria-modal="true" aria-label="Колесо бонусов">
     <h2 class="bz-wheel__h">Колесо бонусов</h2>
     <p class="bz-wheel__sub">Бесплатный прокрут раз в сутки и попытка за каждую
       ${money(state.depositStep || 1000)} ₽ пополнения</p>
@@ -150,8 +155,21 @@ export function openWheel(state, onChange = () => {}) {
     <p class="bz-wheel__prize"></p>
     <button class="bz-wheel__go" type="button"></button>
     <button class="bz-wheel__close" type="button">Закрыть</button>
-    <p class="bz-wheel__meta"></p></div>`;
+    <p class="bz-wheel__meta"></p>
+    <details class="bz-wheel__odds"><summary>Призы и вероятности</summary><ul></ul>
+    <p>Размер сектора не отражает вероятность. Скидка действует на одно открытие подходящего кейса в течение 7 дней. Бесплатная попытка обновляется в 03:00 МСК.</p></details></div>`;
   document.body.appendChild(sheet);
+  const totalWeight = (state.sectors || []).reduce((sum, s) => sum + Number(s.weight || 0), 0);
+  const groups = new Map();
+  for (const s of state.sectors || []) {
+    const row = groups.get(s.code) || {label:s.label,weight:0};
+    row.weight += Number(s.weight || 0); groups.set(s.code,row);
+  }
+  for (const row of groups.values()) {
+    const li = document.createElement('li');
+    li.textContent = `${row.label} · ${totalWeight ? money(row.weight / totalWeight * 100) : '—'}%`;
+    sheet.querySelector('.bz-wheel__odds ul').appendChild(li);
+  }
 
   const disc = sheet.querySelector('.bz-wheel__disc');
   const go = sheet.querySelector('.bz-wheel__go');
@@ -159,8 +177,16 @@ export function openWheel(state, onChange = () => {}) {
   const meta = sheet.querySelector('.bz-wheel__meta');
   let turns = 0, busy = false;
 
-  const close = () => { sheet.remove(); document.removeEventListener('keydown', onKey); };
-  const onKey = e => { if (e.key === 'Escape' && !busy) close(); };
+  const close = () => { sheet.remove(); document.removeEventListener('keydown', onKey); previousFocus?.focus?.(); };
+  const onKey = e => {
+    if (e.key === 'Escape' && !busy) close();
+    if (e.key === 'Tab') {
+      const nodes = [...sheet.querySelectorAll('button:not(:disabled),summary')];
+      const first = nodes[0], last = nodes[nodes.length-1];
+      if (e.shiftKey && document.activeElement === first) { e.preventDefault(); last.focus(); }
+      else if (!e.shiftKey && document.activeElement === last) { e.preventDefault(); first.focus(); }
+    }
+  };
   document.addEventListener('keydown', onKey);
   sheet.addEventListener('click', e => { if (e.target === sheet && !busy) close(); });
   sheet.querySelector('.bz-wheel__close').addEventListener('click', () => { if (!busy) close(); });
@@ -178,6 +204,7 @@ export function openWheel(state, onChange = () => {}) {
       ? `До следующей попытки за депозит: ${money(state.toNextDepositSpin)} ₽` : '';
   }
   paintSheet();
+  sheet.querySelector('.bz-wheel__close').focus({preventScroll:true});
 
   go.addEventListener('click', async () => {
     if (busy) return;

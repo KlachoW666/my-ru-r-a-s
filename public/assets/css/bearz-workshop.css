@@ -1,4 +1,14 @@
 /* BEARZ workshop. Loaded after the legacy theme; no game or rarity overrides. */
+.bearz-shell .zg-box.is-win,.bearz-shell .zg-box.is-lose{height:300px;border-radius:10px}
+.bearz-shell .zg-box.is-win{border-color:var(--accent-primary);background:radial-gradient(ellipse at 50% 35%,var(--accent-glow),transparent 75%),var(--bg-panel);box-shadow:var(--surface-inner-accent)}
+.bearz-shell .zg-box.is-lose{border:1px solid var(--border-strong);background:var(--bg-panel);box-shadow:var(--surface-inner-panel)}
+.bearz-shell .zg-outcome.win{left:50%;top:0;width:240px;height:220px;margin-left:-120px;object-fit:contain;animation:none;filter:none}
+.bearz-shell .zg-verdict{bottom:60px;padding-inline:12px}
+.bearz-shell .zg-pbar{min-width:0;gap:8px}
+.bearz-shell .zg-pname{overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
+.bearz-shell .zg-cols.p2 .zg-grid,.bearz-shell .zg-cols.p3 .zg-grid{grid-template-columns:repeat(3,minmax(0,1fr))}
+.bearz-shell .zg-skin{border-radius:6px;min-width:0}
+@media(max-width:760px){.bearz-shell .zg-cols.p3,.bearz-shell .zg-cols.p4{grid-template-columns:1fr}.bearz-shell .zg-cols.p2 .zg-grid{grid-template-columns:repeat(2,minmax(0,1fr))}.bearz-shell .zg-outcome.win{width:180px;margin-left:-90px}.bearz-shell .zg-verdict p{font-size:12px}}
 @font-face{font-family:BearzDisplay;src:url('/assets/woff2/DrukCyr-HeavyItalic-CTgQ288C.woff2') format('woff2');font-display:swap}
 :root{--bz-line:color-mix(in srgb,var(--text-main) 12%,transparent);--bz-panel:color-mix(in srgb,var(--bg-panel) 94%,var(--sat-brass));--bz-soft:color-mix(in srgb,var(--sat-brass) 8%,transparent)}
 .bearz-shell .bz-layout{display:block!important}

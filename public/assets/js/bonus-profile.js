@@ -104,6 +104,8 @@ function styles() {
   el.id = 'bz-panel-style';
   el.textContent = STYLE;
   document.head.appendChild(el);
+  const theme = document.getElementById('bz-bonus-theme');
+  if (theme) document.head.appendChild(theme);
 }
 
 // --- Уведомления -------------------------------------------------------------
@@ -142,9 +144,6 @@ function toast({ code, title, rewardText }) {
     try {
       await claimReward(code);
       close();
-      // Награда лежит на колесе — открываем его сразу: за ним игрок и шёл.
-      const state = await wheelState().catch(() => null);
-      if (state) openWheel(state);
       document.dispatchEvent(new CustomEvent('bz:refresh'));
     } catch (error) {
       get.disabled = false; get.textContent = 'Получить';
@@ -157,7 +156,13 @@ async function pollAchievements() {
   if (!token()) return;
   try {
     const list = await get('/api/v1/achievements/pending');
-    list.forEach((a, i) => setTimeout(() => toast(a), i * 600));
+    if (!list.length || document.querySelector('.bz-toast')) return;
+    {
+      styles();
+      const box = document.createElement('div'); box.className = 'bz-toast';
+      box.innerHTML = `<div class="bz-toast__item"><div class="bz-toast__body"><div class="bz-toast__kicker">Достижения открыты</div><div class="bz-toast__title">Доступно наград: ${list.length}</div><p class="bz-toast__reward">Награды сохраняются в профиле — их можно получить позже.</p><a href="/profile?bonus=ach" class="bz-toast__get">Открыть профиль</a></div><button class="bz-toast__x" aria-label="Закрыть">×</button></div>`;
+      box.querySelector('button').onclick = () => box.remove(); document.body.appendChild(box);
+    }
   } catch { /* тихо: уведомления не повод ломать страницу */ }
 }
 
@@ -173,7 +178,7 @@ const LABELS = ['Кейсы', 'Апгрейд', 'Батлы'];
  * каждую подпись и ищем контейнер, в котором лежат все три сразу.
  */
 function tabStrip() {
-  const all = [...document.querySelectorAll('button, a, div[role="tab"]')];
+  const all = [...document.querySelectorAll('.pf-history .pf-hist-tabs button')];
   const candidates = LABELS.map(text => all.filter(el => el.textContent.trim() === text));
   if (candidates.some(list => !list.length)) return null;
 
@@ -239,35 +244,23 @@ function achievementsHtml(data, section, skin) {
       ${wait ? '<span class="bz-sec__dot" title="Есть неполученная награда"></span>' : ''}</button>`;
   }).join('');
 
-  const s = skin || {};
-  const cls = v => v ? ` class="${v}"` : '';
-  const head = ['ДОСТИЖЕНИЕ', 'ПРОГРЕСС', 'НАГРАДА', '']
-    .map(t => `<th${cls(s.th)}>${t}</th>`).join('');
-
-  const rows = inGroup(shown).map(i => `
-    <tr${cls(s.tr)} data-done="${i.unlocked ? '1' : '0'}">
-      <td${cls(s.td)}>
-        <span class="bz-row__name">${esc(i.title)}</span>
-        ${i.unlocked ? '<span class="bz-row__tick">✓</span>' : ''}
-      </td>
-      <td${cls(s.td)}>
-        <div class="bz-row__bar"><div class="bz-row__fill" style="width:${i.percent}%"></div></div>
-        <span class="bz-row__num">${money(i.progress)} / ${money(i.threshold)}</span>
-      </td>
-      <td${cls(s.td)}><span class="bz-row__reward">${esc(i.rewardText)}</span></td>
-      <td${cls(s.td)}>${
-        i.claimable ? `<button class="bz-row__get" type="button" data-claim="${esc(i.code)}">Получить</button>`
-        : i.claimed ? '<span class="bz-row__done">Получено</span>'
-        : '<span class="bz-row__wait">—</span>'}</td>
-    </tr>`).join('');
-
-  return `<div class="bz-panel">
-    <div class="bz-sections">${nav}</div>
-    <div class="bz-table"><table${cls(s.table)}>
-      <thead${cls(s.thead)}><tr${cls(s.headRow)}>${head}</tr></thead>
-      <tbody${cls(s.tbody)}>${rows}</tbody>
-    </table></div>
-  </div>`;
+  const cards = inGroup(shown).map(i => {
+    const percent = Math.max(0, Math.min(100, Number(i.percent) || 0));
+    return `<article class="bz-ach-card ${i.claimable ? 'bz-ach-card--ready' : ''}">
+      <div class="bz-ach-card__top"><span class="bz-ach-emblem" aria-hidden="true">${i.claimed ? '✓' : i.claimable ? '★' : '◇'}</span>
+      <span class="bz-ach-status">${i.claimed ? 'Получено' : i.claimable ? 'Награда доступна' : 'В процессе'}</span></div>
+      <h3>${esc(i.title)}</h3>
+      <p class="bz-panel__muted">${esc(shown)} · ${money(i.progress)} из ${money(i.threshold)}</p>
+      <div class="bz-ach-progress" role="progressbar" aria-label="${esc(i.title)}" aria-valuemin="0" aria-valuemax="100" aria-valuenow="${percent}"><span style="width:${percent}%"></span></div>
+      <div class="bz-ach-card__bottom"><div><small>НАГРАДА</small><strong>${esc(i.rewardText)}</strong></div>
+      ${i.claimable ? `<button class="bz-row__get" type="button" data-claim="${esc(i.code)}">Получить</button>` : `<span class="bz-ach-status">${i.claimed ? '✓' : percent + '%'}</span>`}</div>
+    </article>`;
+  }).join('');
+  return `<section class="bz-panel bz-achievements" aria-label="Достижения">
+    <div class="bz-ach-heading"><div><span class="bz-ach-kicker">BEARZ / ЛИЧНЫЙ ПРОГРЕСС</span><h2>Твои достижения</h2>
+    <p class="bz-panel__muted">Прогресс сохраняется автоматически. Доступные награды забирай здесь.</p></div>
+    <div class="bz-ach-summary"><strong>${Number(data.unlocked)||0}<small> / ${Number(data.total)||0}</small></strong><span>достижений открыто</span></div></div>
+    <div class="bz-sections">${nav}</div><div class="bz-ach-grid">${cards}</div></section>`;
 }
 
 function wheelHtml(state) {
@@ -293,6 +286,8 @@ export async function mountProfile() {
   styles();
 
   const { strip, buttons } = found;
+  strip.classList.add('bz-bonus-tabs');
+  strip.parentElement.classList.add('bz-bonus-header');
   const idleClass = tabClass(buttons);
   const activeClass = buttons.find(b => b.className !== idleClass)?.className || idleClass;
 
@@ -312,7 +307,7 @@ export async function mountProfile() {
     return b;
   });
 
-  let panel = null, state = null, data = null, active = null, section = null;
+  let panel = null, state = null, data = null, active = new URLSearchParams(location.search).get('bonus') === 'ach' ? 'ach' : null, section = null;
 
 
   /*
@@ -322,12 +317,14 @@ export async function mountProfile() {
    * вставлялась в шапку, а таблица оставалась на виду.
    */
   const card = (() => {
+    const history = strip.closest('.pf-history');
+    if (history) return history;
     let node = strip;
     while (node.parentElement && node.parentElement !== document.body) {
       node = node.parentElement;
       if (node.querySelector('table')) return node;
     }
-    return strip.parentElement;
+    return strip.parentElement.parentElement;
   })();
   // Оформление снимаем сразу: дальше таблица будет скрыта.
   const skin = tableSkin(card);
@@ -345,7 +342,7 @@ export async function mountProfile() {
    */
   const table = card.querySelector('table');
   const contentBlock = (() => {
-    if (!table) return null;
+    if (!table) return [...card.children].find(el => !el.contains(strip)) || null;
     let node = table;
     while (node.parentElement && !node.parentElement.contains(strip)) node = node.parentElement;
     return node;
@@ -434,6 +431,7 @@ export async function mountProfile() {
     active = null; hidePanel(); paintTabs();
   }));
 
+  paintTabs();
   await refresh();
 }
 

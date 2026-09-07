@@ -394,7 +394,7 @@ function makeBattlesService({ queryAdminDb, getAdminDb, getCaseItemsFromDb, getF
     const totals = new Map(players.map(p => [p.slot, 0]));
 
     for (let round = 0; round < b.rounds; round++) {
-      for (const c of cases) {
+      for (const [caseIndex, c] of cases.entries()) {
         const dist = buildDistribution(c.items, {
           casePrice: c.row.price || 49,
           rtp: DEFAULT_RTP
@@ -405,7 +405,7 @@ function makeBattlesService({ queryAdminDb, getAdminDb, getCaseItemsFromDb, getF
           const { item } = rollOne(dist, {
             serverSeed: b.server_seed,
             clientSeed: `${b.uid}:${c.row.slug}`,
-            nonce: round * 100 + p.slot
+            nonce: (round * cases.length + caseIndex) * Number(b.max_players) + Number(p.slot)
           });
           if (!item) continue;
           const price = Number(item.price) || 0;

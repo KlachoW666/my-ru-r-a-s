@@ -141,7 +141,16 @@ test('compiled join refreshes the saved match without websocket events',async t=
   await store.joinGame(uid);
   assert.equal(store.game.value.status,'RESOLVED');
   assert.equal(store.game.value.participants.length,2);
-  assert.equal(store.game.value.rounds.length,6);
+  assert.equal(store.game.value.rounds.length,0);
+  assert.equal(store.pendingRoundQueue.value.length,6);
+  assert.equal(store.gameState.value,'rolling');
+  assert.equal(store.isFinished.value,false);
+  for(let round=1;round<=6;round++) {
+    store.applyPendingRound();
+    assert.equal(store.game.value.rounds.length,round);
+    store.proceedAfterReveal();
+    assert.equal(store.gameState.value,round===6?'finished':'rolling');
+  }
 });
 test('compiled detail uses the frozen entry amount after catalog price changes',async t=>{
   const {service,uid,query}=await fixture(t);

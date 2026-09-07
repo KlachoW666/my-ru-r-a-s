@@ -77,7 +77,10 @@ export function createBattleModel({request: send = request, uuid = () => crypto.
     clearTimeout(animationTimer);
     s.visibleRounds = 3; s.playback = null;
     const start = Date.parse(battle.finishedAt);
-    if (battle.status === 'finished' && Number.isFinite(start) && Date.now() - start < 15000) play(start);
+    if (battle.status === 'finished') {
+      if (animate) play();
+      else if (Number.isFinite(start) && Date.now() - start < 15000) play(Math.min(start, Date.now()));
+    }
   }
   function play(start = Date.now()) {
     clearTimeout(animationTimer);
