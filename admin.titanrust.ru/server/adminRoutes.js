@@ -320,6 +320,15 @@ function makeAdminRoutes({ app, dbAll, dbGet, dbRun, requireAdminJWT }) {
     ok(res, access.roleCatalog()));
 
   // Выписанные приглашения — чтобы видеть, кто ещё не завёл ключ.
+  app.post('/api/v1/admin/admins/invites/:id/revoke', requireAdminJWT, async (req, res) => {
+    if (access.normalizeRole(req.user?.role) !== 'SUPER_ADMIN') return bad(res, 'Только супер-администратор может отзывать приглашения', 403);
+    try {
+      const result = await dbRun('UPDATE admin_invites SET expires_at = ? WHERE id = ? AND used_at IS NULL',
+        [new Date(0).toISOString(), req.params.id]);
+      if (!result.changes) return bad(res, 'Приглашение не найдено или уже использовано', 409);
+      ok(res, {userSuspended:false});
+    } catch { bad(res, 'Не удалось отозвать приглашение', 500); }
+  });
   app.get('/api/v1/admin/admins/invites', requireAdminJWT, async (req, res) => {
     const rows = await dbAll(
       `SELECT id, target_role, username, created_by, created_at, expires_at, used_at
@@ -363,6 +372,7 @@ function makeAdminRoutes({ app, dbAll, dbGet, dbRun, requireAdminJWT }) {
 
   // Пригласить нового администратора. Домен `admins` — значит только владелец.
   app.post('/api/v1/admin/admins/invite', requireAdminJWT, async (req, res) => {
+    if (access.normalizeRole(req.user?.role) !== 'SUPER_ADMIN') return bad(res, 'Только супер-администратор может создавать приглашения', 403);
     try {
       const body = req.body || {};
       const role = String(body.role || 'VIEWER').toUpperCase();
