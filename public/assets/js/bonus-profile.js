@@ -329,21 +329,42 @@ export async function mountProfile() {
     }
     return strip.parentElement;
   })();
-  // Прямой потомок карточки, внутри которого лежит строка вкладок: после него
-  // и встаёт панель, чтобы вкладки остались сверху.
-  const headerRow = [...card.children].find(el => el.contains(strip)) || strip;
-
-  // Оформление снимаем ДО скрытия таблицы: у скрытого узла классы читаются,
-  // но панель к этому моменту уже должна быть нарисована.
+  // Оформление снимаем сразу: дальше таблица будет скрыта.
   const skin = tableSkin(card);
 
-  const hideable = () => [...card.children].filter(el => el !== headerRow && el !== panel);
+  /*
+   * Куда встаёт панель и что прятать.
+   *
+   * Ориентируемся на САМУ таблицу, а не на структуру карточки: на странице
+   * заголовок, вкладки и таблица лежат в одном контейнере, и правило «спрятать
+   * всё, кроме шапки» не пряталo ничего — панель ложилась поверх истории.
+   *
+   * Берём самый большой кусок разметки, который содержит таблицу, но не
+   * содержит строку вкладок. Это и есть блок истории; пагинация идёт за ним
+   * следующими соседями, её прячем тоже.
+   */
+  const table = card.querySelector('table');
+  const contentBlock = (() => {
+    if (!table) return null;
+    let node = table;
+    while (node.parentElement && !node.parentElement.contains(strip)) node = node.parentElement;
+    return node;
+  })();
+
+  const hideable = () => {
+    if (!contentBlock) return [];
+    const after = [];
+    for (let el = contentBlock; el; el = el.nextElementSibling) if (el !== panel) after.push(el);
+    return after;
+  };
 
   function showPanel(html) {
     if (!panel) {
       panel = document.createElement('div');
       panel.dataset.bzPanel = '1';
-      card.insertBefore(panel, headerRow.nextSibling);
+      panel.style.width = '100%';
+      if (contentBlock) contentBlock.parentElement.insertBefore(panel, contentBlock);
+      else card.appendChild(panel);
     }
     panel.innerHTML = html;
     hideable().forEach(el => { el.dataset.bzHidden = '1'; el.style.display = 'none'; });
