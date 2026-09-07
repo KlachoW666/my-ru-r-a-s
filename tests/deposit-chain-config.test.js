@@ -215,3 +215,19 @@ test('AC8 invalid confirmation closes before reporting its error', async () => {
   assert.equal(subject.context.G.value, false);
   assert.match(subject.errors[0], /Не выбран кейс для группы B, тир 0/);
 });
+
+test('AC9 unchanged numeric thresholds from API can be saved', async () => {
+  const subject = compiledDepositChainSave({p:{value:{0:0,1:174,2:384,3:821,4:1166}}});
+  await subject.save();
+  assert.equal(subject.calls.length,1);
+  assert.equal(subject.errors.length,0);
+  assert.equal(subject.calls[0].data.tiers[0].threshold,'0');
+});
+
+test('AC10 numeric thresholds with only group B report missing C, not an exception', async () => {
+  const subject = compiledDepositChainSave({p:{value:{0:0,1:174,2:384,3:821,4:1166}},
+    r:{value:Object.fromEntries([0,1,2,3,4].map(i=>[`B:${i}`,'deposit-case']))}});
+  await subject.save();
+  assert.equal(subject.calls.length,0);
+  assert.match(subject.errors[0],/группы C, тир 0/);
+});
