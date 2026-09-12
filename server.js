@@ -1163,7 +1163,8 @@ async function getCaseItemsFromDb(caseId) {
     }
   }
 
-  return await getFallbackItems();
+  // Пустой/недоступный состав не заменяется общим каталогом.
+  return [];
 }
 
 async function getFallbackItems() {
@@ -1978,17 +1979,26 @@ app.post('/api/v1/deposit-chain/open', async (req, res) => {
       message: 'Для этой ступени не назначен активный депозитный кейс'
     });
   }
-  // Пул берём из каталога по цене тира, а не из состава кейса: составы бывают
-  // битыми, и бесплатный кейс за 0 руб выдавал предмет за 15 400 руб.
-  const nominal = Math.max(tier.threshold, 50);
-  const picked = await queryItems({ minPrice: 10, maxPrice: nominal * 3, limit: 40, sort: 'asc' });
-  const pool = picked.items.length ? picked.items : await getFallbackItems();
+  // Открываем только состав назначенного кейса. Каталог и резервный пул
+  // не являются его содержимым; при ошибке конфигурации ничего не выдаём.
+  const linkedRows = await queryAdminDb('SELECT id FROM cases WHERE slug = ?', [src.slug]);
+  const pool = linkedRows.failed || !linkedRows.length ? [] : await getCaseItemsFromDb(linkedRows[0].id);
+  const nominal = Number(src.price);
+  if (!Array.isArray(pool) || pool.failed || !pool.length || !Number.isFinite(nominal) || nominal < 0) {
+    return res.status(503).json({status:'error',code:'CHAIN_UNAVAILABLE',message:'Состав депозитного кейса недоступен. Проверьте его в админке.'});
+  }
   const dist = buildDistribution(pool, { casePrice: nominal, rtp: DEFAULT_RTP });
+  if (!dist.entries.length || dist.rtpActual > MAX_RTP) {
+    return res.status(503).json({status:'error',code:'CHAIN_UNAVAILABLE',message:'Депозитный кейс настроен неверно. Проверьте состав и шансы в админке.'});
+  }
 
   const { serverSeed, serverHash } = newServerSeed();
   const clientSeed = String(req.body?.clientSeed || crypto.randomBytes(8).toString('hex'));
   const rolled = rollOne(dist, { serverSeed, clientSeed, nonce: tierIndex });
-  const item = rolled.item || pool[0];
+  const item = rolled.item;
+  if (!item || !pool.includes(item)) {
+    return res.status(503).json({status:'error',code:'CHAIN_UNAVAILABLE',message:'Не удалось определить результат открытия.'});
+  }
 
   const value = Number(item?.price) || 0;
   const claim = await depositLadder.claim({userId:req.auth.sub,tierIndex,threshold:Number(tier.threshold),caseName:tier.caseName,item});
@@ -3255,7 +3265,7 @@ wss.on('connection', (ws) => {
   });
 });
 
-server.listen(PORT, async () => {
+server.listen(PORT, process.env.HOST || '0.0.0.0', async () => {
   await ensureAuthSchema();
   await verifyMailer();
   await battles.ensureSchema();

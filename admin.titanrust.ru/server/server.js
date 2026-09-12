@@ -1334,7 +1334,7 @@ app.get('*', (req, res) => {
     res.sendFile(path.join(PUBLIC_DIR, 'index.html'));
 });
 
-app.listen(PORT, () => {
+app.listen(PORT, process.env.HOST || '0.0.0.0', () => {
     console.log(`====================================================`);
     console.log(`🚀 TitanRust Admin Panel — Full Backend Server`);
     console.log(`🌐 http://localhost:${PORT}`);
