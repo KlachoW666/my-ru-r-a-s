@@ -48,6 +48,19 @@ graphify-out/.graphify_*
 # Локальные заметки и настройки разработчика — в репозитории им не место
 .claude/
 CLAUDE.md
+.agents/
+.codex/
+AGENTS.md
+save/
+
+# Локальные макеты, экспортированные материалы и архивы хотфиксов
+/artifacts/
+/output/
+/public/concepts/
+
+# Ошибочно сохранённые HTML-страницы вместо ресурсов
+/public/image/png
+/public/packs/js/sdk.js
 
 # Граф знаний — генерируется командой: graphify update .
 graphify-out/
