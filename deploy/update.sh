@@ -572,7 +572,7 @@ if [ "$DO_RESTART" = 1 ]; then
   if [ "$DRY_RUN" = 0 ]; then
     step "Проверка"
     ok=1
-    health "http://127.0.0.1:$ADMIN_PORT/api/v1/admin/auth/passkeys" "админка" || ok=0
+    health "http://127.0.0.1:$ADMIN_PORT/api/v1/admin/auth/invite/validate" "админка" || ok=0
     health "http://127.0.0.1:$SITE_PORT/api/v1/cases/health"        "сайт"    || ok=0
     if [ "$ok" = 0 ]; then
       rollback
