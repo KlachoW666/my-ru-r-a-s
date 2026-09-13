@@ -229,8 +229,8 @@ function initDatabase() {
 
         db.get(`SELECT * FROM admin_users WHERE username = 'SUPER_ADMIN'`, [], (err, row) => {
             if (!row) {
-                db.run(`INSERT INTO admin_users (username, email, password, role) VALUES ('SUPER_ADMIN', 'admin@titanrust.ru', 'admin123', 'SUPER_ADMIN')`);
-                console.log('Seeded SUPER_ADMIN (admin@titanrust.ru / admin123)');
+                db.run(`INSERT INTO admin_users (username, email, role) VALUES ('SUPER_ADMIN', 'admin@titanrust.ru', 'SUPER_ADMIN')`);
+                console.log('Seeded SUPER_ADMIN; create an invite to set a password.');
             }
         });
 
@@ -271,6 +271,8 @@ function generateAdminJWT(user) {
         // Роль кладём в токен уже нормализованной: она решает, что можно.
         role: access.normalizeRole(user.role || 'SUPER_ADMIN'),
         email: user.email || 'admin@titanrust.ru',
+        authVersion: Number(user.auth_version || 0),
+        aud: 'bearz-admin',
         exp: Math.floor(Date.now() / 1000) + (30 * 24 * 60 * 60)
     }, JWT_SECRET);
 }
@@ -278,7 +280,7 @@ function generateAdminJWT(user) {
 // ADMIN_REQUIRE_AUTH=1 включает реальную проверку JWT.
 // По умолчанию выключено, чтобы не потерять доступ, пока не заведён ни один
 // passkey. Перед выкладкой на публичный домен ОБЯЗАТЕЛЬНО поставить 1.
-const REQUIRE_ADMIN_AUTH = process.env.ADMIN_REQUIRE_AUTH === '1';
+const REQUIRE_ADMIN_AUTH = process.env.NODE_ENV === 'production' || process.env.ADMIN_REQUIRE_AUTH === '1';
 
 // Роль, от имени которой работает админка при выключенной проверке токена.
 // Нужна, чтобы ролевую модель можно было проверять локально, не заводя passkey.
@@ -292,7 +294,7 @@ const DEV_ROLE = access.normalizeRole(process.env.ADMIN_DEV_ROLE || 'SUPER_ADMIN
  * которому забыли повесить проверку, снова получил бы полный доступ.
  * Раскладка «раздел -> домен -> уровень» живёт в adminAccess.js.
  */
-function requireAdminJWT(req, res, next) {
+async function requireAdminJWT(req, res, next) {
     if (!REQUIRE_ADMIN_AUTH) {
         req.user = { userId: 1, username: 'SUPER_ADMIN', role: DEV_ROLE };
     } else {
@@ -302,7 +304,11 @@ function requireAdminJWT(req, res, next) {
             return res.status(401).json({ success: false, message: 'Требуется авторизация администратора' });
         }
         try {
-            req.user = jwt.verify(token, JWT_SECRET);
+            const payload = jwt.verify(token, JWT_SECRET, { audience: 'bearz-admin' });
+            const user = await passwordAuth.currentUser(payload);
+            if (!user) throw new Error('Revoked session');
+            req.user = { userId: user.id, username: user.username, email: user.email,
+                role: user.role, authVersion: user.auth_version };
         } catch (e) {
             return res.status(401).json({ success: false, message: 'Недействительный или истёкший токен' });
         }
@@ -351,29 +357,15 @@ function fetchSteamMarketBatch(start = 0, count = 100) {
 // Настоящий WebAuthn живёт в passkeys.js и регистрируется ниже.
 // Прежняя заглушка выдавала JWT любому, кто просто дёрнул этот путь.
 
-app.post('/api/v1/admin/auth/login', (req, res) => {
-    if (REQUIRE_ADMIN_AUTH) {
-        return res.status(410).json({ success: false, message: 'Вход только по passkey: /auth/login/options' });
-    }
-    const token = generateAdminJWT({ id: 1, username: 'SUPER_ADMIN', role: 'SUPER_ADMIN', email: 'admin@titanrust.ru' });
-    res.json({ success: true, token, accessToken: token, data: { accessToken: token, user: { userId: 1, username: 'SUPER_ADMIN', role: 'SUPER_ADMIN' } }, user: { id: 1, username: 'SUPER_ADMIN', role: 'SUPER_ADMIN' } });
-});
+const passwordAuthModule = require('./adminPasswordAuth');
+const passwordAuth = passwordAuthModule.createAuth({ connect: () => new sqlite3.Database(DB_PATH) });
+passwordAuth.ready.catch(error => console.error('[Admin auth] Schema:', error.message));
+passwordAuthModule.register({ app, auth: passwordAuth, generateAdminJWT });
 
-app.get('/api/v1/admin/auth/refresh', (req, res) => {
-    // При включённой защите продлеваем сессию только по действующему токену.
-    if (REQUIRE_ADMIN_AUTH) {
-        const header = req.headers.authorization || '';
-        const t = header.startsWith('Bearer ') ? header.slice(7) : null;
-        try {
-            const payload = jwt.verify(t, JWT_SECRET);
-            const token = generateAdminJWT({ id: payload.userId, username: payload.username, role: payload.role, email: payload.email });
-            return res.json({ success: true, data: { accessToken: token, user: payload } });
-        } catch {
-            return res.status(401).json({ success: false, message: 'Сессия истекла, войдите по passkey' });
-        }
-    }
-    const token = generateAdminJWT({ id: 1, username: 'SUPER_ADMIN', role: 'SUPER_ADMIN' });
-    res.json({ success: true, data: { accessToken: token, user: { userId: 1, username: 'SUPER_ADMIN', role: 'SUPER_ADMIN' } } });
+app.get('/api/v1/admin/auth/refresh', requireAdminJWT, (req, res) => {
+    const token = generateAdminJWT({ id: req.user.userId, username: req.user.username,
+        role: req.user.role, email: req.user.email, auth_version: req.user.authVersion });
+    res.json({ success: true, data: { accessToken: token, user: req.user } });
 });
 
 app.get('/api/v1/admin/auth/me', requireAdminJWT, (req, res) => {
@@ -1275,7 +1267,7 @@ app.get('/api/v1/admin/accounting', requireAdminJWT, (req, res) => {
 
 // --- Вход по passkey (WebAuthn) ---
 const passkeys = require('./passkeys').register({
-    app, db, dbAll, dbGet, dbRun, generateAdminJWT
+    app, db, dbAll, dbGet, dbRun, generateAdminJWT, requireAdminJWT
 });
 
 // --- Разделы админки ---
@@ -1342,8 +1334,7 @@ app.listen(PORT, process.env.HOST || '0.0.0.0', () => {
     console.log(`====================================================`);
     passkeys.credentialCount().then((n) => {
         if (REQUIRE_ADMIN_AUTH && n === 0) {
-            console.warn('[!] ADMIN_REQUIRE_AUTH=1, но ни одного passkey не зарегистрировано.');
-            console.warn('    Войти будет нельзя. Зарегистрируйте ключ или временно поставьте 0.');
+            console.log('[Admin] Вход по логину и паролю. Для первого входа создайте инвайт: node deploy/make-invite.js');
         } else if (!REQUIRE_ADMIN_AUTH) {
             console.warn('[!] ADMIN_REQUIRE_AUTH=0 — админка пропускает ЛЮБОЙ запрос без токена.');
             console.warn(`    Ключей зарегистрировано: ${n}. Перед публикацией поставьте 1.`);

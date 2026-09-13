@@ -131,9 +131,8 @@ function register({ app, db, dbAll, dbGet, dbRun, generateAdminJWT, requireAdmin
     const b = Buffer.from(String(row.key_hash));
     if (a.length !== b.length || !crypto.timingSafeEqual(a, b)) return deny();
 
-    const admin = (await dbGet(`SELECT * FROM admin_users WHERE id = ?`, [row.admin_user_id]).catch(() => null))
-      || (await dbGet(`SELECT * FROM admin_users ORDER BY id ASC LIMIT 1`).catch(() => null))
-      || { id: 1, username: 'SUPER_ADMIN', role: 'SUPER_ADMIN' };
+    const admin = await dbGet(`SELECT * FROM admin_users WHERE id = ?`, [row.admin_user_id]).catch(() => null);
+    if (!admin) return deny();
 
     await dbRun(`UPDATE admin_access_keys SET last_used_at = CURRENT_TIMESTAMP WHERE id = ?`, [row.id])
       .catch(() => {});

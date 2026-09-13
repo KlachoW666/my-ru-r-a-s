@@ -2,7 +2,7 @@
 'use strict';
 
 /**
- * Ссылка-приглашение для регистрации passkey в админке.
+ * Ссылка-приглашение для настройки логина и пароля в админке.
  *
  * Зачем нужен отдельный скрипт: экран /register в бандле не показывает форму
  * без токена в адресе, а самое первое приглашение владельцу выдать некому —
@@ -17,7 +17,7 @@
  *   node deploy/make-invite.js --hours 2             другой срок
  *   node deploy/make-invite.js --url https://admin.titanrust.ru
  *
- * Токен одноразовый: гаснет, как только по нему заведут ключ.
+ * Токен одноразовый: гаснет после сохранения пароля.
  */
 
 const path = require('path');
@@ -117,9 +117,9 @@ const get = (sql, p = []) => new Promise((ok, no) => db.get(sql, p, (e, r) => e 
   console.log(`  Роль:        ${role}`);
   console.log(`  Учётка:      ${targetUser ? targetUser.username : (username || 'будет создана при регистрации')}`);
   console.log(`  Действует:   ${hours} ч, до ${new Date(expiresAt).toLocaleString('ru-RU')}`);
-  console.log(`  Одноразовое: гаснет сразу после того, как по нему заведут ключ`);
+  console.log(`  Одноразовое: гаснет после сохранения пароля`);
   console.log('');
-  console.log('  Откройте эту ссылку в браузере, где будет храниться ключ:');
+  console.log('  Откройте ссылку и задайте пароль. USB-ключ не требуется:');
   console.log('');
   console.log(`  ${link}`);
   console.log('');

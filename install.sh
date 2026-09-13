@@ -51,14 +51,14 @@ STEAM_CATALOG_SYNC=0
 EOF
 unset SECRET
 chown "$RUN_USER:$RUN_USER" "$APP/.env"
-cat > "$APP/ecosystem.install.cjs" <<EOF
+cat > "$APP/ecosystem.install.config.cjs" <<EOF
 module.exports = {apps:[
  {name:'main-site',cwd:'$APP',script:'server.js',instances:1,exec_mode:'fork',env:{NODE_ENV:'production',HOST:'127.0.0.1',PORT:'3101'}},
  {name:'admin-panel',cwd:'$APP',script:'admin.titanrust.ru/server/server.js',instances:1,exec_mode:'fork',env:{NODE_ENV:'production',HOST:'127.0.0.1',ADMIN_PORT:'8080'}}
 ]};
 EOF
-chown "$RUN_USER:$RUN_USER" "$APP/ecosystem.install.cjs"
-runuser -u "$RUN_USER" -- pm2 start "$APP/ecosystem.install.cjs" --only admin-panel
+chown "$RUN_USER:$RUN_USER" "$APP/ecosystem.install.config.cjs"
+runuser -u "$RUN_USER" -- pm2 start "$APP/ecosystem.install.config.cjs" --only admin-panel
 wait_http() {
   for attempt in {1..60}; do
     if curl -fsS "$1" -o /dev/null; then return; fi
@@ -67,7 +67,7 @@ wait_http() {
   echo "No healthy response from $1. Inspect PM2 logs."; return 1
 }
 wait_http http://127.0.0.1:8080/
-runuser -u "$RUN_USER" -- pm2 start "$APP/ecosystem.install.cjs" --only main-site
+runuser -u "$RUN_USER" -- pm2 start "$APP/ecosystem.install.config.cjs" --only main-site
 wait_http http://127.0.0.1:3101/
 runuser -u "$RUN_USER" -- pm2 save
 pm2 startup systemd -u "$RUN_USER" --hp /var/lib/bearz
