@@ -48,8 +48,8 @@ async function fixture(t, env){
   return {service,query,balance:async()=>(await query('SELECT balance FROM users WHERE id=1'))[0].balance};
 }
 const item=(price,id=1)=>({id,name:'Test skin',image:'/test.png',price,rarity:'REGULAR'});
-async function handlerFixture(t){
-  const f=await fixture(t),vm=require('node:vm');
+async function handlerFixture(t,env){
+  const f=await fixture(t,env),vm=require('node:vm');
   await f.query('CREATE TABLE cases(id INTEGER PRIMARY KEY,slug TEXT,name TEXT,price REAL,status TEXT,isActive INTEGER,seriesId INTEGER)');
   await f.query("INSERT INTO cases VALUES(1,'farm-ak','farm ak',399,'active',1,NULL)");
   const source=fs.readFileSync(path.join(__dirname,'../server.js'),'utf8');
@@ -67,18 +67,18 @@ async function handlerFixture(t){
   const call=async body=>{const res={statusCode:200,status(n){this.statusCode=n;return this;},json(v){this.body=v;return this;}};await handler({body,params:{},auth:{sub:1}},res);return res;};
   return {...f,call,handler,live,rollCount:()=>rollCount,failLive:()=>{failLive=true;},setItems:items=>{caseItems=items;}};
 }
-test('AC4 actual case handler returns inventory ids without cash winnings',async t=>{const f=await handlerFixture(t);const r=await f.call({slug:'farm-ak',count:4});assert.equal(r.statusCode,200);assert.equal(r.body.data.rewardDestination,'inventory');assert.equal(r.body.data.inventoryIds.length,4);assert.equal(r.body.data.balance,33435.04);assert.equal(r.body.data.winnings,1943);assert.equal(f.live.length,4);});
+test('AC4 actual case handler returns auto-sold winnings',async t=>{const f=await handlerFixture(t);const r=await f.call({slug:'farm-ak',count:4});assert.equal(r.statusCode,200);assert.equal(r.body.data.rewardDestination,'balance');assert.equal(r.body.data.inventoryIds.length,4);assert.equal(r.body.data.balance,35378.04);assert.equal(r.body.data.winnings,1943);assert.equal(f.live.length,4);});
 for(const count of [-1,0,1.5,6,'2oops'])test(`AC4 handler rejects quantity ${count} before fairness`,async t=>{const f=await handlerFixture(t);const r=await f.call({slug:'farm-ak',count});assert.equal(r.statusCode,400);assert.equal(f.rollCount(),0);assert.equal(await f.balance(),35031.04);});
-test('AC4 zero-price case is not charged 49 rubles',async t=>{const f=await handlerFixture(t);await f.query('UPDATE cases SET price=0');const r=await f.call({slug:'farm-ak',count:1});assert.equal(r.statusCode,200);assert.equal(await f.balance(),35031.04);});
+test('AC4 zero-price case is not charged 49 rubles',async t=>{const f=await handlerFixture(t);await f.query('UPDATE cases SET price=0');const r=await f.call({slug:'farm-ak',count:1});assert.equal(r.statusCode,200);assert.equal(await f.balance(),35361.04);});
 test('AC4 failed case settlement publishes no live drop',async t=>{const f=await handlerFixture(t);await f.query("CREATE TRIGGER reject_case BEFORE INSERT ON inventory BEGIN SELECT RAISE(ABORT,'item failure'); END");const r=await f.call({slug:'farm-ak',count:4});assert.equal(r.statusCode,500);assert.equal(f.live.length,0);assert.equal(await f.balance(),35031.04);});
 test('AC1 award preserves item cents',async t=>{const {service}=await fixture(t);const r=await service.award(1,item(765.87));assert.equal(r.value,765.87);assert.equal((await service.list(1)).totalValue,765.87);});
 test('AC2 simultaneous sales cannot credit one item twice',async t=>{const {service,balance}=await fixture(t);const a=await service.award(1,item(933));const r=await Promise.all([service.sell(1,[a.id]),service.sell(1,[a.id])]);assert.equal(r.filter(x=>x.ok).length,1);assert.equal(await balance(),35964.04);});
 test('AC2 ledger failure leaves the item owned',async t=>{const {service,query,balance}=await fixture(t);const a=await service.award(1,item(330));await query("CREATE TRIGGER fail_sale BEFORE INSERT ON transactions BEGIN SELECT RAISE(ABORT,'test ledger failure'); END");await service.sell(1,[a.id]).catch(()=>{});assert.equal((await service.list(1)).count,1);assert.equal(await balance(),35031.04);});
 test('AC2 rejects a partially unavailable selection',async t=>{const {service,balance}=await fixture(t);const a=await service.award(1,item(330));const r=await service.sell(1,[a.id,99999]);assert.ok(r.error);assert.equal(await balance(),35031.04);});
-test('AC3 screenshot amount goes to inventory until explicitly sold',async t=>{const {service,balance}=await fixture(t);assert.equal(typeof service.settleCase,'function');const r=await service.settleCase(1,{cost:1596,drops:[item(330),item(330),item(350),item(933)],ref:'farm-ak'});assert.equal(r.rewardDestination,'inventory');assert.equal(r.winnings,1943);assert.equal(await balance(),33435.04);assert.equal((await service.list(1)).totalValue,1943);const sale=await service.sell(1,r.inventoryIds);assert.equal(sale.payout,1943);assert.equal(await balance(),35378.04);});
+test('AC3 all four case drops are sold immediately',async t=>{const {service,balance}=await fixture(t);const r=await service.settleCase(1,{cost:1596,drops:[item(330),item(330),item(350),item(933)],ref:'farm-ak'});assert.equal(r.rewardDestination,'balance');assert.equal(r.winnings,1943);assert.equal(await balance(),35378.04);assert.equal((await service.list(1)).count,0);assert.equal((await service.sell(1,r.inventoryIds)).error,'NOT_FOUND');assert.equal(await balance(),35378.04);});
 test('AC3 inventory insert failure rolls back the case debit',async t=>{const {service,query,balance}=await fixture(t);assert.equal(typeof service.settleCase,'function');await query("CREATE TRIGGER fail_award BEFORE INSERT ON inventory WHEN NEW.price=350 BEGIN SELECT RAISE(ABORT,'test item failure'); END");await assert.rejects(service.settleCase(1,{cost:798,drops:[item(330),item(350)],ref:'test'}),/test item failure/);assert.equal(await balance(),35031.04);assert.equal((await service.list(1)).count,0);});
-test('AC3 competing openings cannot overspend',async t=>{const {service,query,balance}=await fixture(t);assert.equal(typeof service.settleCase,'function');await query('UPDATE users SET balance=399 WHERE id=1');const results=await Promise.allSettled([service.settleCase(1,{cost:399,drops:[item(330)],ref:'test'}),service.settleCase(1,{cost:399,drops:[item(330)],ref:'test'})]);assert.equal(results.filter(x=>x.status==='fulfilled').length,1);assert.equal(await balance(),0);assert.equal((await service.list(1)).count,1);});
-test('AC4 committed opening stays successful if live feed fails',async t=>{const f=await handlerFixture(t);f.failLive();const r=await f.call({slug:'farm-ak',count:4});assert.equal(r.statusCode,200);assert.equal(r.body.data.balance,33435.04);assert.equal((await f.service.list(1)).count,4);});
+test('AC3 competing openings cannot overspend',async t=>{const {service,query,balance}=await fixture(t);assert.equal(typeof service.settleCase,'function');await query('UPDATE users SET balance=399 WHERE id=1');const results=await Promise.allSettled([service.settleCase(1,{cost:399,drops:[item(330)],ref:'test'}),service.settleCase(1,{cost:399,drops:[item(330)],ref:'test'})]);assert.equal(results.filter(x=>x.status==='fulfilled').length,1);assert.equal(await balance(),330);assert.equal((await service.list(1)).count,0);});
+test('AC4 committed opening stays successful if live feed fails',async t=>{const f=await handlerFixture(t);f.failLive();const r=await f.call({slug:'farm-ak',count:4});assert.equal(r.statusCode,200);assert.equal(r.body.data.balance,35378.04);assert.equal((await f.service.list(1)).count,0);});
 const tradeLink='https://steamcommunity.com/tradeoffer/new/?partner=123&token=test';
 test('AC2 withdrawal refuses a partially unavailable selection',async t=>{const f=await fixture(t);const a=await f.service.award(1,item(330));const r=await f.service.requestWithdraw(1,[a.id,99999],tradeLink);assert.equal(r.error,'NOT_FOUND');assert.equal((await f.service.list(1)).count,1);assert.equal((await f.query('SELECT * FROM skin_withdrawals')).length,0);});
 test('AC2 inventory lock failure rolls back withdrawal creation',async t=>{const f=await fixture(t);const a=await f.service.award(1,item(330));await f.query("CREATE TRIGGER fail_lock BEFORE UPDATE ON inventory BEGIN SELECT RAISE(ABORT,'test lock failure'); END");await f.service.requestWithdraw(1,[a.id],tradeLink).catch(()=>{});assert.equal((await f.query('SELECT * FROM skin_withdrawals')).length,0);assert.equal((await f.service.list(1)).count,1);});
@@ -88,8 +88,8 @@ test('AC2 failed cancellation keeps withdrawal pending',async t=>{const f=await 
 test('AC4 response winnings equal the saved cent total',async t=>{const f=await handlerFixture(t);f.setItems([item(0.1),item(0.2)]);const r=await f.call({slug:'farm-ak',count:2});assert.equal(r.body.data.winnings,0.3);});
 test('AC2 cancelled withdrawal makes the skin sellable once',async t=>{const f=await fixture(t);const a=await f.service.award(1,item(330));const w=await f.service.requestWithdraw(1,[a.id],tradeLink);assert.equal((await f.service.cancelWithdraw(1,w.uid)).ok,true);assert.equal((await f.service.sell(1,[a.id])).payout,330);assert.equal((await f.service.cancelWithdraw(1,w.uid)).error,'ALREADY_PROCESSED');assert.equal((await f.service.list(1)).count,0);assert.equal(await f.balance(),35361.04);});
 test('AC3 configured auto-sale credits once without sellable inventory',async t=>{const f=await fixture(t,{AUTO_SELL_WINS:'1'});const r=await f.service.settleCase(1,{cost:1596,drops:[item(330),item(330),item(350),item(933)],ref:'farm-ak'});assert.equal(r.rewardDestination,'balance');assert.equal(r.balance,35378.04);assert.equal((await f.service.list(1)).count,0);assert.equal((await f.service.sell(1,r.inventoryIds)).error,'NOT_FOUND');assert.equal(await f.balance(),35378.04);});
-test('AC2 configured sale fee uses saved kopecks',async t=>{const f=await fixture(t,{SELL_FEE_PERCENT:'2.5'});const r=await f.service.settleCase(1,{cost:1596,drops:[item(330),item(330),item(350),item(933)],ref:'farm-ak'});assert.equal(r.sellFeePercent,2.5);const sale=await f.service.sell(1,r.inventoryIds);assert.equal(sale.payout,1894.43);assert.equal(await f.balance(),35329.47);});
-test('AC4 HTTP opening exposes an explicit sale without double credit',async t=>{
+test('AC2 manual sale fee still applies to previously owned skins',async t=>{const f=await fixture(t,{SELL_FEE_PERCENT:'2.5'});const awards=[];for(const d of [item(330),item(330),item(350),item(933)])awards.push(await f.service.award(1,d));const sale=await f.service.sell(1,awards.map(x=>x.id));assert.equal(sale.payout,1894.43);assert.equal(await f.balance(),36925.47);});
+test('AC4 HTTP opening pays immediately and rejects resale',async t=>{
   const f=await handlerFixture(t),express=require('express'),vm=require('node:vm');
   const app=express();app.use(express.json());app.post('/api/v1/cases/open',f.handler);
   const source=fs.readFileSync(path.join(__dirname,'../server.js'),'utf8');
@@ -101,8 +101,74 @@ test('AC4 HTTP opening exposes an explicit sale without double credit',async t=>
   const base=`http://127.0.0.1:${server.address().port}/api/v1`;
   const post=(url,data)=>fetch(base+url,{method:'POST',headers:{'content-type':'application/json'},body:JSON.stringify(data)});
   const opening=await (await post('/cases/open',{slug:'farm-ak',count:4})).json();
-  assert.equal(opening.data.rewardDestination,'inventory');assert.equal(opening.data.balance,33435.04);
+  assert.equal(opening.data.rewardDestination,'balance');assert.equal(opening.data.balance,35378.04);
   const ids=opening.data.inventoryIds;const sale=await (await post('/inventory/sell',{ids})).json();
-  assert.equal(sale.status,'success');assert.equal(sale.data.payout,1943);assert.equal(sale.data.balance,35378.04);
+  assert.equal(sale.status,'error');assert.equal(await f.balance(),35378.04);
   assert.equal((await post('/inventory/sell',{ids})).status,400);assert.equal(await f.balance(),35378.04);
+});
+for(const env of [{},{AUTO_SELL_WINS:'0'},{AUTO_SELL_WINS:'1'},{SELL_FEE_PERCENT:'30'}]){
+  test('case screenshot balance is 217.17 with '+JSON.stringify(env),async t=>{
+    const f=await handlerFixture(t,env);
+    await f.query('UPDATE users SET balance=154.75 WHERE id=1');
+    await f.query('UPDATE cases SET price=99');
+    f.setItems([item(161.42)]);
+    const r=await f.call({slug:'farm-ak',count:1});
+    assert.equal(r.statusCode,200);
+    assert.equal(r.body.data.balance,217.17);
+    assert.equal(r.body.data.newBalance,217.17);
+    assert.equal(await f.balance(),217.17);
+    assert.equal(r.body.data.rewardDestination,'balance');
+    assert.equal(r.body.data.sellFeePercent,0);
+    const entries=await f.query('SELECT type,amount FROM transactions ORDER BY id');
+    assert.deepEqual(entries,[{type:'case_open',amount:-99},{type:'case_win',amount:161.42}]);
+    assert.equal((await f.service.list(1)).count,0);
+    const all=await f.service.list(1,{status:'all'});
+    assert.equal(all.items[0].status,'sold');
+    assert.equal((await f.service.sell(1,r.body.data.inventoryIds)).error,'NOT_FOUND');
+    assert.equal(await f.balance(),217.17);
+  });
+}
+test('case payout ledger failure rolls back debit and every reward',async t=>{
+  const f=await fixture(t);
+  await f.query("CREATE TRIGGER fail_win BEFORE INSERT ON transactions WHEN NEW.type='case_win' AND NEW.amount=350 BEGIN SELECT RAISE(ABORT,'payout failed'); END");
+  await assert.rejects(f.service.settleCase(1,{cost:798,drops:[item(330),item(350)],ref:'test'}),/payout failed/);
+  assert.equal(await f.balance(),35031.04);
+  assert.equal((await f.query('SELECT * FROM inventory')).length,0);
+  assert.equal((await f.query('SELECT * FROM transactions')).length,0);
+});
+test('ordinary inventory awards remain owned with auto-sale disabled',async t=>{
+  const f=await fixture(t,{AUTO_SELL_WINS:'0'});
+  await f.service.award(1,item(161.42),{source:'upgrade'});
+  assert.equal(await f.balance(),35031.04);
+  assert.equal((await f.service.list(1)).count,1);
+});
+test('five cases pay the sum of all drop prices in kopecks',async t=>{
+  const f=await handlerFixture(t);
+  await f.query('UPDATE users SET balance=500 WHERE id=1');
+  await f.query('UPDATE cases SET price=99');
+  f.setItems([item(161.42),item(0.1),item(0.2),item(99),item(0)]);
+  const r=await f.call({slug:'farm-ak',count:5});
+  assert.equal(r.body.data.winnings,260.72);
+  assert.equal(r.body.data.balance,265.72);
+  assert.equal((await f.query("SELECT * FROM transactions WHERE type='case_win'")).length,5);
+});
+test('future winnings cannot fund an opening the player cannot afford',async t=>{
+  const f=await handlerFixture(t);
+  await f.query('UPDATE users SET balance=98.99 WHERE id=1');
+  await f.query('UPDATE cases SET price=99');
+  f.setItems([item(161.42)]);
+  const r=await f.call({slug:'farm-ak',count:1});
+  assert.equal(r.statusCode,400);
+  assert.equal(f.rollCount(),0);
+  assert.equal(await f.balance(),98.99);
+  assert.equal((await f.query('SELECT * FROM transactions')).length,0);
+});
+test('case payout leaves previously owned items untouched',async t=>{
+  const f=await fixture(t,{AUTO_SELL_WINS:'0'});
+  const old=await f.service.award(1,item(42),{source:'case',ref:'old case'});
+  await f.service.settleCase(1,{cost:99,drops:[item(161.42)],ref:'new case'});
+  const owned=await f.service.list(1);
+  assert.equal(owned.count,1);
+  assert.equal(owned.items[0].id,old.id);
+  assert.equal(await f.balance(),35093.46);
 });

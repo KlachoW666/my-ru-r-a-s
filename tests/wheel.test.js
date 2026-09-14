@@ -171,7 +171,7 @@ test('AC10 скидка гасится вместе со списанием и �
   // Кейс за 100 ₽ со скидкой 35% стоит 65 ₽.
   await inventory.settleCase(1, { cost: 65, drops: [{ name: 'Item', price: 20, image: '', rarity: 'REGULAR' }],
     ref: 'Кейс', discountId: discount.id });
-  assert.equal((await all('SELECT balance FROM users WHERE id=1'))[0].balance, 935);
+  assert.equal((await all('SELECT balance FROM users WHERE id=1'))[0].balance, 955);
   assert.equal((await all('SELECT used_at FROM case_discounts'))[0].used_at !== null, true);
 
   // Второе открытие с той же скидкой обязано провалиться целиком.
@@ -179,7 +179,7 @@ test('AC10 скидка гасится вместе со списанием и �
     () => inventory.settleCase(1, { cost: 65, drops: [{ name: 'Item', price: 20, image: '', rarity: 'REGULAR' }],
       ref: 'Кейс', discountId: discount.id }),
     e => e.code === 'DISCOUNT_SPENT');
-  assert.equal((await all('SELECT balance FROM users WHERE id=1'))[0].balance, 935, 'откат: деньги не списаны');
+  assert.equal((await all('SELECT balance FROM users WHERE id=1'))[0].balance, 955, 'откат: деньги не списаны');
   assert.equal(await wheel.bestDiscount(1, 100), null, 'использованная скидка больше не предлагается');
 });
 

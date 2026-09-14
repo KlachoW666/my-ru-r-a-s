@@ -3,15 +3,13 @@
 /**
  * Инвентарь игрока и вывод скинов.
  *
- * Было: выигранный предмет сразу превращался в деньги на балансе, инвентаря не
- * существовало, вывести скин было нельзя.
+ * Открытие кейса через settleCase сразу продаёт выпавшие скины за полную
+ * стоимость: списание, начисление и история фиксируются одной транзакцией.
+ * В инвентаре остаются проданные записи, недоступные для повторной продажи.
  *
- * Стало: выигрыш попадает в инвентарь как предмет. Дальше игрок либо продаёт
- * его по цене каталога, либо заказывает вывод на свой Steam trade-link.
- *
- * Поведение переключается переменной AUTO_SELL_WINS=1 — тогда предмет
- * записывается в инвентарь сразу как проданный, а деньги идут на баланс, как
- * было раньше. По умолчанию 0: предмет остаётся предметом.
+ * Для отдельных наград через award действует AUTO_SELL_WINS=1. Без него
+ * предмет остаётся в инвентаре для ручной продажи или вывода. Настройка не
+ * отключает автоматическую выплату при открытии кейса.
  *
  * Контракт снят с бандла (wallet-rLlmihs3.js):
  *   GET  /wallet/skins/withdraw-inventory   — что можно вывести
@@ -27,7 +25,7 @@ const cents = value => {
   return c;
 };
 
-/** 1 — старое поведение: выигрыш сразу деньгами. */
+/** Автопродажа отдельных наград; settleCase всегда выплачивает выигрыш. */
 const AUTO_SELL = process.env.AUTO_SELL_WINS === '1';
 
 /** Комиссия площадки при продаже предмета обратно, %. */
@@ -108,9 +106,9 @@ function makeInventoryService({ queryAdminDb, getAdminDb, adjustBalanceById, rec
     return transaction(getAdminDb, tx => awardInTransaction(tx, userId, item, {source,ref}));
   }
 
-  async function awardInTransaction(tx, userId, item, {source='case',ref=''}={}) {
+  async function awardInTransaction(tx, userId, item, {source='case',ref='',autoSell=AUTO_SELL}={}) {
     const price = cents(item.price) / 100;
-    const status = AUTO_SELL ? 'sold' : 'owned';
+    const status = autoSell ? 'sold' : 'owned';
 
     const numericId = typeof item.id === 'string' && item.id.startsWith('db-')
       ? parseInt(item.id.slice(3), 10) : (parseInt(item.id, 10) || null);
@@ -121,7 +119,7 @@ function makeInventoryService({ queryAdminDb, getAdminDb, adjustBalanceById, rec
       [String(userId), numericId, item.marketHashName || item.name, item.name,
        item.image, price, item.rarity, item.color || item.colorHex, source, ref, status]);
 
-    if (AUTO_SELL) {
+    if (autoSell) {
       const credited = await tx.run('UPDATE users SET balance=ROUND(balance+?,2) WHERE id=?',[price,userId]);
       if (credited.changes !== 1) throw new Error('Пользователь не найден');
       await tx.run('INSERT INTO transactions(user_id,type,amount,comment) VALUES(?,?,?,?)',[userId,source+'_win',price,item.name]);
@@ -150,13 +148,15 @@ function makeInventoryService({ queryAdminDb, getAdminDb, adjustBalanceById, rec
       }
       const debit=await tx.run('UPDATE users SET balance=ROUND(balance-?,2) WHERE id=? AND ROUND(balance*100)>=?', [costCents/100,userId,costCents]);
       if(debit.changes!==1) throw Object.assign(new Error('Недостаточно средств или баланс недоступен'),{code:'INSUFFICIENT_BALANCE',status:400});
-      const awards=[];
-      for(const d of drops) awards.push(await awardInTransaction(tx,userId,d,{source:'case',ref}));
       await tx.run('INSERT INTO transactions(user_id,type,amount,comment) VALUES(?,?,?,?)',[userId,'case_open',-costCents/100,`Открытие: ${ref} x${drops.length}`]);
+      const awards=[];
+      // Полная стоимость дропа идёт на баланс даже при AUTO_SELL_WINS=0.
+      // Ручная продажа этих записей невозможна: они сразу имеют статус sold.
+      for(const d of drops) awards.push(await awardInTransaction(tx,userId,d,{source:'case',ref,autoSell:true}));
       const balance=(await tx.get('SELECT balance FROM users WHERE id=?',[userId])).balance;
       return {balance,newBalance:balance,winnings:awards.reduce((sum,a)=>sum+cents(a.value),0)/100,
-        rewardDestination:AUTO_SELL?'balance':'inventory',inventoryIds:awards.map(a=>a.id),
-        sellFeePercent:SELL_FEE_PERCENT,discountApplied:discountId!=null};
+        rewardDestination:'balance',inventoryIds:awards.map(a=>a.id),
+        sellFeePercent:0,discountApplied:discountId!=null};
     });
   }
 
