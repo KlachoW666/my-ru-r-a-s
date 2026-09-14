@@ -43,6 +43,25 @@ test('real upload accepts a 2 MiB image and rejects over 10 MiB without leaving 
     assert.equal(rejected.body.code, 'FILE_TOO_LARGE');
     assert.match(rejected.body.message, /10 МБ/);
     assert.deepEqual(fs.readdirSync(folder), originalFiles);
+
+    // Real project MP4: ensure the upload is byte-preserving and seekable.
+    const video = fs.readFileSync(path.join(__dirname, '../public/assets/raffle/mega-loop.mp4'));
+    const videoForm = new FormData();
+    videoForm.append('file', new Blob([video], { type: 'video/mp4' }), 'case.mp4');
+    const videoResponse = await fetch(`http://127.0.0.1:${server.address().port}/api/v1/admin/media/upload?folder=cases`, {
+      method: 'POST', body: videoForm
+    });
+    assert.equal(videoResponse.status, 200);
+    const media = (await videoResponse.json()).data;
+    assert.match(media.path, /^\/uploads\/cases\/.+\.mp4$/);
+    assert.deepEqual(fs.readFileSync(path.join(temp, 'public', media.path)), video);
+    const range = await fetch(`http://127.0.0.1:${server.address().port}${media.path}`, {
+      headers: { Range: 'bytes=0-31' }
+    });
+    assert.equal(range.status, 206);
+    assert.match(range.headers.get('content-type'), /video\/mp4/);
+    assert.equal(range.headers.get('content-range'), `bytes 0-31/${video.length}`);
+    assert.deepEqual(Buffer.from(await range.arrayBuffer()), video.subarray(0, 32));
   } finally {
     await new Promise(resolve => server.close(resolve));
     fs.rmSync(temp, { recursive: true, force: true });
