@@ -15,7 +15,8 @@
 const crypto = require('crypto');
 const access = require('./adminAccess');
 
-function makeAdminRoutes({ app, dbAll, dbGet, dbRun, requireAdminJWT }) {
+function makeAdminRoutes({ app, dbAll, dbGet, dbRun, requireAdminJWT, getDb }) {
+  const skins = require('../../services/skinWithdrawals').makeSkinWithdrawals({getDb,queryAdminDb:dbAll});
   const ok = (res, data, extra = {}) => res.json({ success: true, data, items: Array.isArray(data) ? data : undefined, ...extra });
   const bad = (res, message, code = 400) => res.status(code).json({ success: false, message });
 
@@ -612,6 +613,17 @@ function makeAdminRoutes({ app, dbAll, dbGet, dbRun, requireAdminJWT }) {
   });
 
   // Заявки на вывод + решения по ним.
+  app.get('/api/v1/admin/wallet/skin-requests',requireAdminJWT,async(req,res)=>{
+    try{
+      await skins.schema();
+      const rows=await dbAll("SELECT w.*,u.username FROM withdrawals w LEFT JOIN users u ON u.id=w.user_id WHERE w.channel='SKINS' ORDER BY w.id DESC LIMIT 200");
+      ok(res,rows.map(r=>({...r,items:JSON.parse(r.skin_items||'[]')})));
+    }catch(e){console.error('[Skin requests]',e);bad(res,'Не удалось загрузить заявки',503);}
+  });
+  app.post('/api/v1/admin/wallet/skin-requests/:id/:decision(claim|approve|reject)',requireAdminJWT,async(req,res)=>{
+    try{ok(res,req.params.decision==='claim'?await skins.claim(req.params.id):await skins.decide(req.params.id,req.params.decision,String(req.body?.deliveryRef||'')));}
+    catch(e){bad(res,e.status?e.message:'Не удалось обработать заявку',e.status||503);}
+  });
   app.get(['/api/v1/admin/wallet/withdrawals', '/api/v1/admin/withdrawals'], requireAdminJWT, async (req, res) => {
     const where = req.query.status && req.query.status !== 'all' ? ' WHERE w.status = ?' : '';
     const params = where ? [req.query.status] : [];
@@ -626,6 +638,10 @@ function makeAdminRoutes({ app, dbAll, dbGet, dbRun, requireAdminJWT }) {
     const approve = req.params.decision === 'approve';
     const w = await dbGet(`SELECT * FROM withdrawals WHERE id = ?`, [req.params.id]);
     if (!w) return bad(res, 'Заявка не найдена', 404);
+    if(w.channel==='SKINS'){
+      try{return ok(res,await skins.decide(w.id,req.params.decision,String(req.body?.deliveryRef||'')));}
+      catch(e){return bad(res,e.status?e.message:'Не удалось обработать заявку',e.status||503);}
+    }
     if (w.status !== 'pending') return bad(res, 'Заявка уже обработана', 409);
 
     await dbRun(`UPDATE withdrawals SET status = ? WHERE id = ?`, [approve ? 'approved' : 'rejected', req.params.id]);

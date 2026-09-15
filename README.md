@@ -67,6 +67,7 @@ NODE_ENV= PUBLIC_URL=http://localhost:3101 ALLOW_MOCK_AUTH=1 npm start
 | [docs/ADMIN.md](docs/ADMIN.md) | разделы админки, фабрика CRUD, ловушки порядка роутов |
 | [docs/AUTH.md](docs/AUTH.md) | вход через Steam, настройка домена, nginx |
 | [docs/TROUBLESHOOTING.md](docs/TROUBLESHOOTING.md) | плейбуки по типовым багам |
+| [docs/SKIN-WITHDRAWALS.md](docs/SKIN-WITHDRAWALS.md) | вывод скинами за баланс, ручная обработка и суточный топ |
 
 ## Реализовано
 

@@ -742,11 +742,6 @@ const giveaways = makeGiveawaysService({
 const LIVE_FEED_MAX = 200;
 const realDrops = [];              // самые свежие в начале
 
-const FEED_NAMES = [
-  // Первым здесь стояло имя прежнего бренда — осталось от Kaban.
-  'Фитиль', 'RustLord', 'Шрам', 'Тихий', 'Барсук', 'Никита', 'Волк', 'Прапор',
-  'Сталкер', 'Мясник', 'Хантер', 'Гоша', 'Рейдер', 'Пепел', 'Тайга'
-];
 
 /**
  * eventType у нас в верхнем регистре, а карточка ленты читает `gameType`
@@ -799,66 +794,14 @@ function pushLiveDrop(win) {
   if (realDrops.length > LIVE_FEED_MAX) realDrops.length = LIVE_FEED_MAX;
 }
 
-// Синтетика пересобирается раз в 30 с, поэтому лента выглядит живой даже
-// без игроков. Веса подобраны так, чтобы дорогие предметы падали редко.
-let syntheticFeed = [];
-let syntheticAt = 0;
-
-async function buildSyntheticFeed() {
-  const items = await getLiveItems();
-  if (!items.length) return [];
-  const cheap = items.filter(i => i.price < 1000);
-  const mid = items.filter(i => i.price >= 1000 && i.price < 10000);
-  const rich = items.filter(i => i.price >= 10000);
-  const pick = () => {
-    const r = Math.random();
-    const pool = r < 0.75 ? cheap : r < 0.96 ? mid : rich;
-    const src = pool.length ? pool : items;
-    return src[Math.floor(Math.random() * src.length)];
-  };
-
-  // Синтетику привязываем к НАСТОЯЩИМ кейсам. Без этого у карточки нет ни
-  // картинки кейса, ни названия для подсказки, а клик ведёт в никуда —
-  // а синтетика заполняет почти всю ленту, пока игроков мало.
-  const cases = (await getLiveCases()).filter(c => c.slug);
-
-  const now = Math.floor(Date.now() / 1000);
-  const out = [];
-  for (let i = 0; i < LIVE_FEED_MAX; i++) {
-    const item = pick();
-    const eventType = i % 9 === 0 ? 'UPGRADER' : i % 5 === 0 ? 'BATTLE' : 'CASE';
-    // Кейс нужен только выпадению из кейса: у апгрейдера и баттла свои
-    // страницы, и подсовывать им кейс было бы враньём.
-    const c = eventType === 'CASE' && cases.length
-      ? cases[Math.floor(Math.random() * cases.length)]
-      : null;
-
-    out.push(makeWin({
-      item,
-      user: { id: 1000 + i, name: FEED_NAMES[i % FEED_NAMES.length] + (i % 7 ? '' : '_' + (10 + i)), avatar: mockAvatar, steamLevel: (i * 7) % 60 },
-      eventType,
-      caseSlug: c ? c.slug : '',
-      caseName: c ? c.name : '',
-      caseImage: c ? c.image : null,
-      betAmount: Math.round(item.price * (0.4 + Math.random() * 0.5)),
-      multiplier: 1,
-      wonAt: now - i * 11
-    }));
-  }
-  return out;
-}
 
 async function getLiveFeed(mode, limit) {
-  if (Date.now() - syntheticAt > 30000 || !syntheticFeed.length) {
-    syntheticFeed = await buildSyntheticFeed();
-    syntheticAt = Date.now();
-  }
-  const all = [...realDrops, ...syntheticFeed];
-  if (mode === 'top' || mode === 'bigwins') {
-    return [...all].sort((a, b) => b.itemValue - a.itemValue).slice(0, limit);
-  }
-  return all.slice(0, limit);   // live — по свежести
+  return topDrops.recent(mode, limit);
 }
+
+const {makeTopDropsService,registerTopDropsRoutes}=require('./services/topDrops');
+const topDrops=makeTopDropsService({queryAdminDb,fixImageUrl,mapRarity});
+registerTopDropsRoutes(app,{service:topDrops,requireUser});
 
 // --- STEAM SYNC ADMIN & PUBLIC ENDPOINTS ---
 
@@ -1752,8 +1695,9 @@ app.get(['/api/v1/banners', '/api/v1/banner', '/banners'], async (req, res) => {
 // data.wins, получал undefined, и лента оставалась пустой.
 app.get(['/api/v1/live/recent', '/api/v1/drops/recent'], async (req, res) => {
   const mode = String(req.query.mode || 'live');
-  const limit = Math.min(parseInt(req.query.limit) || 40, 100);
-  res.json({ status: "success", data: { wins: await getLiveFeed(mode, limit) } });
+  const limit = Math.max(1, Math.min(parseInt(req.query.limit) || 40, 100));
+  try { res.json({ status: "success", data: { wins: await getLiveFeed(mode, limit) } }); }
+  catch(error) { console.error('[Live feed]', error); res.status(503).json({status:'error',message:'Лента дропов временно недоступна'}); }
 });
 
 // Stats
@@ -2322,7 +2266,10 @@ async function requireUser(req, res) {
   return user;
 }
 
-app.get(['/api/v1/wallet/skins/withdraw-inventory', '/api/v1/inventory'], async (req, res) => {
+const skinWithdrawals = require('./services/skinWithdrawals').makeSkinWithdrawals({getDb:getAdminDb,queryAdminDb,fixImageUrl});
+require('./services/skinWithdrawalRoutes').register({app,service:skinWithdrawals,requireUser,limits:()=>adminSetting('wallet_config',{})});
+
+app.get('/api/v1/inventory', async (req, res) => {
   const user = await requireUser(req, res); if (!user) return;
   const data = await inventory.list(user.id, { status: req.query.status || 'owned' });
   res.json({ status: "success", data, items: data.items, total: data.count });
@@ -2352,7 +2299,7 @@ app.post(['/api/v1/wallet/skins/withdraw', '/api/v1/inventory/withdraw'], async 
   res.json({ status: "success", data: r, message: "Заявка на вывод создана" });
 });
 
-app.get('/api/v1/wallet/skins/withdrawals', async (req, res) => {
+app.get('/api/v1/inventory/withdrawals', async (req, res) => {
   const user = await requireUser(req, res); if (!user) return;
   const data = await inventory.listWithdrawals(user.id);
   res.json({ status: "success", data, items: data, total: data.length });
@@ -2719,12 +2666,8 @@ app.get('/api/v1/wallet/eligibility', async (req, res) => {
 
   let spentToday = 0;
   if (!user.isGuest) {
-    await ensureTxSchema();
-    const rows = await queryAdminDb(
-      `SELECT COALESCE(SUM(ABS(amount)), 0) AS s FROM transactions
-        WHERE user_id = ? AND type = 'withdraw' AND datetime(created_at) >= datetime('now', '-1 day')`,
-      [user.id]);
-    spentToday = rows.length ? Number(rows[0].s) || 0 : 0;
+    try { spentToday = await skinWithdrawals.spentToday(user.id); }
+    catch { return res.status(503).json({status:'error',message:'Лимиты вывода временно недоступны'}); }
   }
   const remaining = Math.max(0, cap - spentToday);
 
@@ -3014,6 +2957,7 @@ app.post('/api/v1/wallet/withdraw', async (req, res) => {
 
   const body = req.body || {};
   const channel = String(body.channel || 'CRYPTO').toUpperCase();
+  if(channel !== 'CRYPTO') return res.status(400).json({status:'error',message:'Неизвестный способ вывода'});
   const amount = Math.round(Number(body.amount) || 0);
   const limits = await adminSetting('wallet_config', {});
   const min = Number(limits.minWithdraw ?? 500);

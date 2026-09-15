@@ -1290,7 +1290,7 @@ require('./adminKeys').register({
   app, db, dbAll, dbGet, dbRun, generateAdminJWT, requireAdminJWT, access
 });
 
-require('./adminRoutes').makeAdminRoutes({ app, dbAll, dbGet, dbRun, requireAdminJWT });
+require('./adminRoutes').makeAdminRoutes({ app, dbAll, dbGet, dbRun, requireAdminJWT, getDb:()=>new sqlite3.Database(DB_PATH) });
 require('./adminSchema').ensureAdminSchema({ dbRun, dbGet })
     .catch((e) => console.error('[Admin] Схема разделов:', e.message));
 
